@@ -1,0 +1,78 @@
+[package]
+name = "formiclimate"
+version = "0.1.0"
+authors = ["PlesleronTepryos"]
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "formiclimate"
+test = false
+bench = false
+
+[dependencies]
+panic-halt = "1.0.0"
+ufmt = "0.2.0"
+nb = "1.1.0"
+embedded-hal = "1.0"
+avr-device = "0.8.1"
+libm = "0.2.16"
+ag-lcd = "0.3.0"
+
+[dependencies.arduino-hal]
+git = "https://github.com/rahix/avr-hal"
+rev = "e5c8f37fe48419956e722490a82b9ca9b9fc61a2"
+features = ["arduino-micro"]
+
+# Configure the build for minimal size - AVRs have very little program memory
+[profile.dev]
+panic = "abort"
+lto = true
+opt-level = "s"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+debug = true
+lto = true
+opt-level = "s"
+
+[lints.rust]
+absolute_paths_not_starting_with_crate = "warn"
+elided_lifetimes_in_paths = "warn"
+# missing_debug_implementations = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+# unused_crate_dependencies = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+missing_assert_message = "warn"
+std_instead_of_core = "warn"
+std_instead_of_alloc = "warn"
+alloc_instead_of_core = "warn"
+undocumented_unsafe_blocks = "warn"
+missing_const_for_fn = "warn"
+str_to_string = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+multiple_unsafe_ops_per_block = "warn"
+
+suboptimal_flops = "allow"
+module_name_repetitions = "allow"
+cast_possible_truncation = "allow"
+cast_lossless = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+return_self_not_must_use = "allow"
+non_send_fields_in_send_ty = "allow"
+while_float = "allow"
+no_effect_underscore_binding = "allow"
+too_many_lines = "allow"
+
+[lints.rustdoc]
+unescaped_backticks = "warn"
