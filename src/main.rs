@@ -4,23 +4,23 @@
 #![no_std]
 #![no_main]
 #![feature(abi_avr_interrupt)]
+#![feature(variant_count)]
 
 use arduino_hal::{
     adc::AdcSettings,
     entry,
-    hal::port::{PB4, PC6, PC7, PD6, PD7, PE6, PF0, PF1, PF4, PF5, PF6, PF7},
-    pac::{ADC, TC1},
+    hal::port::{PB4, PC6, PC7, PD7, PE6, PF0, PF1, PF4, PF5, PF6, PF7},
+    pac::{ADC, TC1, TWI},
     pins,
     port::{
-        mode::{Floating, Input, Output},
+        mode::{Floating, Input},
         Pin,
     },
-    Adc, Delay, Peripherals, Pins,
+    Adc, I2c, Peripherals, Pins,
 };
 use panic_halt as _;
 
-use ag_lcd::{Blink, Cursor, Display, LcdDisplay, Lines};
-
+pub mod display;
 pub mod millis;
 pub mod ntc;
 pub mod pwm;
@@ -28,10 +28,12 @@ pub mod relay;
 pub mod rtc;
 
 use crate::{
+    display::{Display, Page},
     millis::{init_millis, millis},
     ntc::Thermistor,
     pwm::PWMController,
     relay::Relay,
+    rtc::DS1307,
 };
 
 const PWM_HZ: u16 = 25_000;
@@ -39,7 +41,7 @@ const PWM_HZ: u16 = 25_000;
 const SAMPLE_INTERVAL: u32 = 1;
 const UPDATE_INTERVAL: u32 = 10;
 const DISPLAY_INTERVAL: u32 = 100;
-const BLINK_INTERVAL: u32 = 1000;
+const PAGE_SWAP_INTERVAL: u32 = 10000;
 
 const GRACE_PERIOD: u32 = 2000;
 
@@ -85,9 +87,9 @@ impl Sensorium {
             ),
             condenser_temp: Thermistor::new(
                 a4.into_analog_input(&mut adc),
-                100_000.0,
+                50_000.0,
                 3_950.0,
-                10_0500.0,
+                46_200.0,
             ),
             evaporator_temp: Thermistor::new(
                 a5.into_analog_input(&mut adc),
@@ -117,15 +119,6 @@ impl Sensorium {
     }
 }
 
-/// A page being displayed on the LCD
-pub enum Page {
-    /// No display
-    None,
-
-    /// Temperature Readouts
-    Temps,
-}
-
 /// Formicarium climate control stystem state machine
 #[must_use]
 pub struct ClimateController {
@@ -134,7 +127,6 @@ pub struct ClimateController {
     next_sample: u32,
     next_update: u32,
     next_display: u32,
-    next_blink: u32,
 
     target_temp: Option<f32>,
 
@@ -145,36 +137,24 @@ pub struct ClimateController {
 
     pwm: PWMController,
 
-    blink: Pin<Output, PC7>,
-    _aux1: Pin<Input<Floating>, PD6>,
+    rtc: DS1307,
+    sqw: Pin<Input<Floating>, PC7>,
+
     _aux2: Pin<Input<Floating>, PF7>,
     _aux3: Pin<Input<Floating>, PF6>,
 
-    display: LcdDisplay<Pin<Output>, Delay>,
-
-    last_page: Page,
+    display: Display,
 }
 
 impl ClimateController {
     /// Construct and initialize state machine and interface with hardware
-    pub fn new(pins: Pins, adc: ADC, tc1: TC1) -> Self {
-        let rs = pins.mosi.into_output().downgrade();
-        let rw = pins.d2.into_output().downgrade();
-        let en = pins.led_rx.into_output().downgrade();
-        let d4 = pins.d3.into_output().downgrade();
-        let d5 = pins.sck.into_output().downgrade();
-        let d6 = pins.d4.into_output().downgrade();
-        let d7 = pins.miso.into_output().downgrade();
-
-        let delay = arduino_hal::Delay::new();
-
+    pub fn new(pins: Pins, adc: ADC, tc1: TC1, twi: TWI) -> Self {
         Self {
             sensorium: Sensorium::new(adc, pins.a2, pins.a3, pins.a4, pins.a5),
 
             next_sample: 0,
             next_update: 0,
             next_display: 0,
-            next_blink: 0,
 
             target_temp: None,
 
@@ -185,24 +165,27 @@ impl ClimateController {
 
             pwm: PWMController::new(tc1, pins.d9, pins.d10, pins.d11, PWM_HZ),
 
-            blink: pins.d13.into_output(),
-            _aux1: pins.d12,
+            rtc: DS1307::new(I2c::new(
+                twi,
+                pins.d2.into_pull_up_input(),
+                pins.d3.into_pull_up_input(),
+                50_000,
+            )),
+            // Note: d13 is connected via a 1k resistor to d8, which, when d8 is set high, acts as a
+            // pull-up for the ds1307's open-drain oscillator output
+            sqw: pins.d13,
+
             _aux2: pins.a0,
             _aux3: pins.a1,
 
-            display: LcdDisplay::new(rs, en, delay)
-                // .with_full_bus(d0, d1, d2, d3, d4, d5, d6, d7)
-                .with_half_bus(d4, d5, d6, d7)
-                .with_display(Display::On)
-                .with_blink(Blink::Off)
-                .with_cursor(Cursor::Off)
-                .with_cols(20)
-                .with_lines(Lines::FourLines)
-                .with_rw(rw) // optional (set to GND if not provided)
-                .with_reliable_init(20000)
-                .build(),
-
-            last_page: Page::None,
+            display: Display::new(
+                pins.d4,
+                pins.d12,
+                pins.led_rx,
+                pins.sck,
+                pins.mosi,
+                pins.miso,
+            ),
         }
     }
 
@@ -215,6 +198,10 @@ impl ClimateController {
         self.target_temp = Some(target);
 
         self.master_120vac.activate();
+
+        arduino_hal::delay_ms(500);
+
+        self.display.init();
     }
 
     fn set_condenser_fan_duty(&mut self, duty: f32) {
@@ -300,82 +287,19 @@ impl ClimateController {
         }
         self.next_display += DISPLAY_INTERVAL;
 
-        self.print_temps();
-    }
+        let page = match (now / PAGE_SWAP_INTERVAL).rem_euclid(Page::COUNT as u32) {
+            0 => Page::Temps(
+                self.sensorium.habitat_temp.fahrenheit(),
+                self.sensorium.coolant_temp.fahrenheit(),
+                self.sensorium.condenser_temp.fahrenheit(),
+                self.sensorium.evaporator_temp.fahrenheit(),
+            ),
+            1 => Page::Time(self.rtc.get_time().map_err(|_| "Can't get RTC time!")),
+            _ => unreachable!(),
+        };
 
-    fn try_blink(&mut self, now: u32) {
-        if now < self.next_blink {
-            return;
-        }
-        self.next_blink += BLINK_INTERVAL;
-
-        self.blink.toggle();
-    }
-
-    fn print_temps(&mut self) {
-        let first_print = !matches!(self.last_page, Page::Temps);
-
-        self.print_temp(
-            0,
-            self.sensorium.habitat_temp.fahrenheit(),
-            "Habitat",
-            first_print,
-        );
-        self.print_temp(
-            1,
-            self.sensorium.coolant_temp.fahrenheit(),
-            "Coolant",
-            first_print,
-        );
-        self.print_temp(
-            2,
-            self.sensorium.condenser_temp.fahrenheit(),
-            "Condenser",
-            first_print,
-        );
-        self.print_temp(
-            3,
-            self.sensorium.evaporator_temp.fahrenheit(),
-            "Evaporator",
-            first_print,
-        );
-
-        self.last_page = Page::Temps;
-    }
-
-    fn print_temp(&mut self, row: u8, temp: f32, title: &str, first: bool) {
-        if first {
-            self.display.set_position(0, row);
-            self.display.print(title);
-            self.display.print(": ");
-        } else {
-            self.display.set_position(title.len() as u8 + 2, row);
-        }
-
-        let hundreds = (libm::floorf(temp / 100.0) as u8).rem_euclid(10);
-        if hundreds > 0 {
-            self.display.print(digit(hundreds));
-        }
-
-        let tens = (libm::floorf(temp / 10.0) as u8).rem_euclid(10);
-        if tens > 0 || hundreds > 0 {
-            self.display.print(digit(tens));
-        }
-
-        let ones = (temp as u8).rem_euclid(10);
-        if ones > 0 || tens > 0 || hundreds > 0 {
-            self.display.print(digit(ones));
-        }
-
-        self.display.print(".");
-
-        let tenths = ((temp - libm::floorf(temp)) * 10.0) as u8;
-        self.display.print(digit(tenths));
-
-        let hundredths = ((temp * 10.0 - libm::floorf(temp * 10.0)) * 10.0) as u8;
-        self.display.print(digit(hundredths));
-
-        self.display.print("F ");
+        self.display.set_page(page);
+        self.display.refresh();
     }
 }
 
@@ -389,7 +313,7 @@ fn main() -> ! {
 
     init_millis(&periphs.TC0);
 
-    let mut controller = ClimateController::new(pins, periphs.ADC, periphs.TC1);
+    let mut controller = ClimateController::new(pins, periphs.ADC, periphs.TC1, periphs.TWI);
 
     // Safety: not called inside avr_device::interrupt::free
     unsafe { avr_device::interrupt::enable() };
@@ -402,7 +326,6 @@ fn main() -> ! {
         controller.try_sample(now);
         controller.try_update(now);
         controller.try_display(now);
-        controller.try_blink(now);
     }
 }
 
@@ -411,21 +334,3 @@ fn main() -> ! {
 pub fn normalize(value: f32, min: f32, max: f32) -> f32 {
     (value.clamp(min, max) - min) / (max - min)
 }
-
-const fn digit(digit: u8) -> &'static str {
-    match digit {
-        0 => "0",
-        1 => "1",
-        2 => "2",
-        3 => "3",
-        4 => "4",
-        5 => "5",
-        6 => "6",
-        7 => "7",
-        8 => "8",
-        9 => "9",
-        _ => unreachable!(),
-    }
-}
-
-/* Ok so I know this is a bit ambitious, but now that I've got my cooling system pretty much finalized hardware-wise, I'd like to make it as "smart" as possible on the software side. Not like IoT type stuff, but rather continuously monitored self-tuning to maximize power efficiency and temperature stability. It's currently running pretty simply, just switching the compressor on and off to keep the water loop chilled, and switching the enclosure radiator fan on and off to regulate the enclosure temp. I would use PWM for that fan but for some reason it stalls out below ~70% duty. I have four temperature readouts: one in the enclosure, one in the water loop, one on the evaporator, and one on the condenser. The condenser fan, water circulation pump */

@@ -342,7 +342,7 @@ impl Freq {
 
 /// Complete time reading; layout identical to [DS1307] internally
 #[expect(missing_docs, reason = "self-explanatory variants")]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct RTCTime {
     pub seconds: Seconds,
@@ -423,7 +423,7 @@ impl RTCTime {
 /// Seconds encoded as 2 digit BCD
 ///
 /// Note: bit 7 is allowed to be set, but this will not reflect in the value of seconds
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Seconds(u8);
 
@@ -467,18 +467,18 @@ impl Seconds {
     /// Returns value as binary
     #[must_use]
     pub const fn bin(self) -> u8 {
-        decode_bcd7b(self.0)
+        decode_bcd7b(self.0 & 0x7f)
     }
 
     /// Returns value as BCD
     #[must_use]
     pub const fn bcd(self) -> u8 {
-        self.0
+        self.0 & 0x7f
     }
 }
 
 /// Minutes encoded as 2 digit BCD
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Minutes(u8);
 
@@ -537,7 +537,7 @@ impl Minutes {
 /// 12/24-hour format detected and handled automatically
 ///
 /// Internally normalized to 24-hour format
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Hours(u8);
 
@@ -620,7 +620,7 @@ impl Hours {
 
 /// Day of the week
 #[expect(missing_docs, reason = "self-explanatory variants")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Day {
     Sunday = 1,
@@ -701,7 +701,7 @@ impl Default for Day {
 }
 
 /// Day of the month encoded as 2 digit BCD
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Date(u8);
 
@@ -763,7 +763,7 @@ impl Default for Date {
 
 /// Month of the year
 #[expect(missing_docs, reason = "self-explanatory variants")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Month {
     January = 1,
@@ -887,7 +887,7 @@ impl Default for Month {
 }
 
 /// Year encoded as 2 digit BCD
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Year(u8);
 
