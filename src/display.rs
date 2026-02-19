@@ -8,10 +8,7 @@ use arduino_hal::{
         mode::{Floating, Input, Output},
         Pin,
     },
-    Delay,
 };
-
-use ag_lcd::{Blink, Cursor, LcdDisplay, Lines};
 
 use crate::rtc::RTCTime;
 
@@ -36,10 +33,17 @@ impl Page {
 }
 
 /// Climate controller display subsystem
+///
+/// Note: optimized for binary size at the cost of generic utility
 #[must_use]
 pub struct Display {
-    lcd: LcdDisplay<Pin<Output>, Delay>,
-    last_page: Page,
+    rs: Pin<Output, PD6>,
+    en: Pin<Output, PD4>,
+    d4: Pin<Output, PB0>,
+    d5: Pin<Output, PB1>,
+    d6: Pin<Output, PB2>,
+    d7: Pin<Output, PB3>,
+
     page: Page,
     needs_clear: bool,
 }
@@ -54,20 +58,14 @@ impl Display {
         mosi: Pin<Input<Floating>, PB2>,
         miso: Pin<Input<Floating>, PB3>,
     ) -> Self {
-        let lcd_rs = d12.into_output().downgrade();
-        let lcd_en = d4.into_output().downgrade();
-        let lcd_d4 = led_rx.into_output().downgrade();
-        let lcd_d5 = sck.into_output().downgrade();
-        let lcd_d6 = mosi.into_output().downgrade();
-        let lcd_d7 = miso.into_output().downgrade();
-
         Self {
-            lcd: LcdDisplay::new(lcd_rs, lcd_en, arduino_hal::Delay::new())
-                .with_half_bus(lcd_d4, lcd_d5, lcd_d6, lcd_d7)
-                .with_lines(Lines::FourLines)
-                .with_cols(20)
-                .build(),
-            last_page: Page::Blank,
+            rs: d12.into_output(),
+            en: d4.into_output(),
+            d4: led_rx.into_output(),
+            d5: sck.into_output(),
+            d6: mosi.into_output(),
+            d7: miso.into_output(),
+
             page: Page::Blank,
             needs_clear: false,
         }
@@ -75,8 +73,98 @@ impl Display {
 
     /// Initialize the display
     pub fn init(&mut self) {
-        self.lcd.set_blink(Blink::Off);
-        self.lcd.set_cursor(Cursor::Off);
+        self.set_func(0x08); // 4-bit bus; two lines; 5x8 char size
+        self.set_ctrl(0x04); // Display on; cursor/blink off
+        self.set_mode(0x02); // Left-to-right layout; no display shift
+        self.clear();
+        self.home();
+    }
+
+    fn clear(&mut self) {
+        self.command(0x01);
+        arduino_hal::delay_us(3000);
+    }
+
+    fn home(&mut self) {
+        self.command(0x02);
+        arduino_hal::delay_us(3000);
+    }
+
+    fn set_mode(&mut self, mode: u8) {
+        self.command(0x04 | mode);
+        arduino_hal::delay_us(100);
+    }
+
+    fn set_ctrl(&mut self, ctrl: u8) {
+        self.command(0x08 | ctrl);
+        arduino_hal::delay_us(100);
+    }
+
+    fn set_func(&mut self, func: u8) {
+        self.command(0x20 | func);
+        arduino_hal::delay_us(100);
+    }
+
+    fn set_pos(&mut self, col: u8, row: u8) {
+        const OFFSETS: [u8; 4] = [0x00, 0x40, 0x14, 0x54];
+        let pos = col + OFFSETS[(row & 0x3) as usize];
+        self.command(0x80 | pos);
+        arduino_hal::delay_us(100);
+    }
+
+    fn command(&mut self, cmd: u8) {
+        self.send8(cmd, false);
+    }
+
+    fn print(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.write(ch as u8);
+        }
+    }
+
+    fn write(&mut self, value: u8) {
+        self.send8(value, true);
+        arduino_hal::delay_us(100);
+    }
+
+    fn send8(&mut self, byte: u8, mode: bool) {
+        if mode {
+            self.rs.set_high();
+        } else {
+            self.rs.set_low();
+        }
+
+        self.send4(byte >> 4);
+        self.send4(byte & 0xf);
+    }
+
+    fn send4(&mut self, half_byte: u8) {
+        if half_byte & 0b1000 != 0 {
+            self.d7.set_high();
+        } else {
+            self.d7.set_low();
+        }
+        if half_byte & 0b0100 != 0 {
+            self.d6.set_high();
+        } else {
+            self.d6.set_low();
+        }
+        if half_byte & 0b0010 != 0 {
+            self.d5.set_high();
+        } else {
+            self.d5.set_low();
+        }
+        if half_byte & 0b0001 != 0 {
+            self.d4.set_high();
+        } else {
+            self.d4.set_low();
+        }
+        self.pulse();
+    }
+
+    fn pulse(&mut self) {
+        self.en.set_high();
+        self.en.set_low();
     }
 
     /// Set the page and associated data to be drawn on the next refresh
@@ -89,12 +177,8 @@ impl Display {
 
     /// Refresh the display, drawing the currently set page if it has changed since the last refresh
     pub fn refresh(&mut self) {
-        if self.page == self.last_page {
-            return;
-        }
-
         if self.needs_clear {
-            self.lcd.clear();
+            self.clear();
         }
 
         match self.page {
@@ -109,55 +193,54 @@ impl Display {
                 // 1st row: |Today is DayName    |
                 // 2nd row: |YYYY.MM.DD  HH:MM:SS|
 
-                self.lcd.set_position(0, 0);
-                self.lcd.print("Today is ");
-                self.lcd.print(time.day.name());
+                self.set_pos(0, 0);
+                self.print("Today is ");
+                self.print(time.day.name());
 
-                self.lcd.set_position(0, 1);
-                self.lcd.print("20");
+                self.set_pos(0, 1);
+                self.print("20");
                 self.print_bcd(time.year.bcd());
-                self.lcd.print(".");
+                self.print(".");
                 self.print_bcd(time.month.bcd());
-                self.lcd.print(".");
+                self.print(".");
                 self.print_bcd(time.date.bcd());
-                self.lcd.print("  ");
+                self.print("  ");
                 self.print_bcd(time.hours.bcd_24h());
-                self.lcd.print(":");
+                self.print(":");
                 self.print_bcd(time.minutes.bcd());
-                self.lcd.print(":");
+                self.print(":");
                 self.print_bcd(time.seconds.bcd());
             }
             Page::Time(Err(msg)) => {
-                self.lcd.set_position(0, 0);
-                self.lcd.print(msg);
-                self.lcd.set_position(0, 1);
-                self.lcd.print(BLANK_LINE);
-                self.lcd.set_position(0, 2);
-                self.lcd.print(BLANK_LINE);
+                self.set_pos(0, 0);
+                self.print(msg);
+                self.set_pos(0, 1);
+                self.print(BLANK_LINE);
+                self.set_pos(0, 2);
+                self.print(BLANK_LINE);
             }
         }
 
-        self.last_page = self.page;
         self.needs_clear = false;
     }
 
     fn print_temp(&mut self, row: u8, title: &str, temp: f32, first: bool) {
         if first {
-            self.lcd.set_position(0, row);
-            self.lcd.print(title);
+            self.set_pos(0, row);
+            self.print(title);
         } else {
-            self.lcd.set_position(title.len() as u8, row);
+            self.set_pos(title.len() as u8, row);
         }
 
         self.print_float(temp);
 
-        self.lcd.print("F");
+        self.print("F");
     }
 
     /// Prints a 2-digit BCD value
     fn print_bcd(&mut self, value: u8) {
-        self.lcd.print(digit(value >> 4));
-        self.lcd.print(digit(value & 0xf));
+        self.print(digit(value >> 4));
+        self.print(digit(value & 0xf));
     }
 
     /// Prints a floating point value in the range `[-999.99, 999.99]` at the current position,
@@ -176,31 +259,31 @@ impl Display {
 
         match (hundreds, tens, ones) {
             (0, 0, 0) => {
-                self.lcd.print("   ");
-                self.lcd.print(sign);
+                self.print("   ");
+                self.print(sign);
             }
             (0, 0, _) => {
-                self.lcd.print("  ");
-                self.lcd.print(sign);
-                self.lcd.print(digit(ones));
+                self.print("  ");
+                self.print(sign);
+                self.print(digit(ones));
             }
             (0, _, _) => {
-                self.lcd.print(" ");
-                self.lcd.print(sign);
-                self.lcd.print(digit(tens));
-                self.lcd.print(digit(ones));
+                self.print(" ");
+                self.print(sign);
+                self.print(digit(tens));
+                self.print(digit(ones));
             }
             (_, _, _) => {
-                self.lcd.print(sign);
-                self.lcd.print(digit(hundreds));
-                self.lcd.print(digit(tens));
-                self.lcd.print(digit(ones));
+                self.print(sign);
+                self.print(digit(hundreds));
+                self.print(digit(tens));
+                self.print(digit(ones));
             }
         }
 
-        self.lcd.print(".");
-        self.lcd.print(digit(tenths));
-        self.lcd.print(digit(hundredths));
+        self.print(".");
+        self.print(digit(tenths));
+        self.print(digit(hundredths));
     }
 }
 

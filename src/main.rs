@@ -120,6 +120,44 @@ impl Sensorium {
 }
 
 /// Formicarium climate control stystem state machine
+///
+/// # Pin Configuration
+///
+/// `PORTB`:
+/// - `PB0`: LCD D4
+/// - `PB1`: LCD D5
+/// - `PB2`: LCD D6
+/// - `PB3`: LCD D7
+/// - `PB4`: relay 3 (master 120V)
+/// - `PB5`: PWM Channel A
+/// - `PB6`: PWM Channel B
+/// - `PB7`: PWM Channel C
+///
+/// `PORTC`:
+/// - `PC6`: relay 0 (compressor)
+/// - `PC7`: RTC square wave input
+///
+/// `PORTD`:
+/// - `PD0`: I2C SCL
+/// - `PD1`: I2C SDA
+/// - `PD2`: unused
+/// - `PD3`: unused
+/// - `PD4`: LCD enable
+/// - `PD5`: unused; board modified to break this pin out to the factory NC pin that would be A7
+/// - `PD6`: LCD RS
+/// - `PD7`: relay 1 (heater)
+///
+/// `PORTE`:
+/// - `PE2`: unused; board modified to break this pin out to the factory NC pin that would be A6
+/// - `PE6`: relay 2 (not yet used)
+///
+/// `PORTF`:
+/// - `PF0`: thermistor (mounted on evaporator)
+/// - `PF1`: thermistor (mounted on condenser)
+/// - `PF4`: thermistor (mounted on formicarium)
+/// - `PF5`: thermistor (mounted in coolant loop)
+/// - `PF6`: unused
+/// - `PF7`: unused
 #[must_use]
 pub struct ClimateController {
     sensorium: Sensorium,
@@ -138,6 +176,10 @@ pub struct ClimateController {
     pwm: PWMController,
 
     rtc: DS1307,
+    #[expect(
+        dead_code,
+        reason = "currently unused in software; just included to prevent accidental pin misuse"
+    )]
     sqw: Pin<Input<Floating>, PC7>,
 
     _aux2: Pin<Input<Floating>, PF7>,
