@@ -7,33 +7,28 @@
 #![feature(variant_count)]
 
 use arduino_hal::{
-    adc::AdcSettings,
     entry,
-    hal::port::{PB4, PC6, PC7, PD7, PE6, PF0, PF1, PF4, PF5, PF6, PF7},
-    pac::{ADC, TC1, TWI},
-    pins,
+    hal::port::{PB4, PC6, PC7, PD2, PD3, PD5, PD7, PE2, PE6, PF6, PF7},
     port::{
-        mode::{Floating, Input},
+        mode::{Floating, Input, Output},
         Pin,
     },
-    Adc, I2c, Peripherals, Pins,
+    I2c, Peripherals,
 };
 use panic_halt as _;
 
 pub mod display;
 pub mod millis;
-pub mod ntc;
 pub mod pwm;
-pub mod relay;
 pub mod rtc;
+pub mod sens;
 
 use crate::{
     display::{Display, Page},
     millis::{init_millis, millis},
-    ntc::Thermistor,
     pwm::PWMController,
-    relay::Relay,
     rtc::DS1307,
+    sens::Sensorium,
 };
 
 const PWM_HZ: u16 = 25_000;
@@ -46,78 +41,6 @@ const PAGE_SWAP_INTERVAL: u32 = 10000;
 const GRACE_PERIOD: u32 = 2000;
 
 const TARGET_TEMP: f32 = 57.5;
-
-/// The control system's complete sensory apparatus
-#[must_use]
-pub struct Sensorium {
-    adc: Adc,
-
-    coolant_temp: Thermistor<PF5>,
-    habitat_temp: Thermistor<PF4>,
-    condenser_temp: Thermistor<PF1>,
-    evaporator_temp: Thermistor<PF0>,
-
-    sens: f32,
-    sens_steps: u8,
-}
-
-impl Sensorium {
-    /// Construct sensorium
-    pub fn new(
-        adc: ADC,
-        a2: Pin<Input<Floating>, PF5>,
-        a3: Pin<Input<Floating>, PF4>,
-        a4: Pin<Input<Floating>, PF1>,
-        a5: Pin<Input<Floating>, PF0>,
-    ) -> Self {
-        let mut adc = Adc::new(adc, AdcSettings::default());
-
-        Self {
-            coolant_temp: Thermistor::new(
-                a2.into_analog_input(&mut adc),
-                10_000.0,
-                3_380.0,
-                9_820.0,
-            ),
-            habitat_temp: Thermistor::new(
-                a3.into_analog_input(&mut adc),
-                20_000.0,
-                3_950.0,
-                21_440.0,
-            ),
-            condenser_temp: Thermistor::new(
-                a4.into_analog_input(&mut adc),
-                50_000.0,
-                3_950.0,
-                46_200.0,
-            ),
-            evaporator_temp: Thermistor::new(
-                a5.into_analog_input(&mut adc),
-                10_000.0,
-                3_380.0,
-                9_860.0,
-            ),
-
-            adc,
-
-            sens: 1.0,
-            sens_steps: 10,
-        }
-    }
-
-    /// Take a measurement sample on all sensors
-    pub fn sample(&mut self) {
-        self.coolant_temp.sample(&mut self.adc, self.sens);
-        self.habitat_temp.sample(&mut self.adc, self.sens);
-        self.condenser_temp.sample(&mut self.adc, self.sens);
-        self.evaporator_temp.sample(&mut self.adc, self.sens);
-
-        if self.sens_steps > 0 {
-            self.sens *= 0.5;
-            self.sens_steps -= 1;
-        }
-    }
-}
 
 /// Formicarium climate control stystem state machine
 ///
@@ -162,72 +85,82 @@ impl Sensorium {
 pub struct ClimateController {
     sensorium: Sensorium,
 
+    compressor: Pin<Output, PC6>,
+    heater: Pin<Output, PD7>,
+    _relay2: Pin<Output, PE6>,
+    master_120vac: Pin<Output, PB4>,
+
+    pwm: PWMController,
+
+    rtc: DS1307,
+    _sqw: Pin<Input<Floating>, PC7>,
+
+    _pd2: Pin<Input<Floating>, PD2>,
+    _pd3: Pin<Input<Floating>, PD3>,
+    _pd5: Pin<Input<Floating>, PD5>,
+    _pe2: Pin<Input<Floating>, PE2>,
+    _pf6: Pin<Input<Floating>, PF6>,
+    _pf7: Pin<Input<Floating>, PF7>,
+
+    display: Display,
+
     next_sample: u32,
     next_update: u32,
     next_display: u32,
 
     target_temp: Option<f32>,
-
-    compressor: Relay<PC6>,
-    heater: Relay<PD7>,
-    _relay2: Relay<PE6>,
-    master_120vac: Relay<PB4>,
-
-    pwm: PWMController,
-
-    rtc: DS1307,
-    #[expect(
-        dead_code,
-        reason = "currently unused in software; just included to prevent accidental pin misuse"
-    )]
-    sqw: Pin<Input<Floating>, PC7>,
-
-    _aux2: Pin<Input<Floating>, PF7>,
-    _aux3: Pin<Input<Floating>, PF6>,
-
-    display: Display,
 }
 
 impl ClimateController {
-    /// Construct and initialize state machine and interface with hardware
-    pub fn new(pins: Pins, adc: ADC, tc1: TC1, twi: TWI) -> Self {
+    /// Construct and initialize climate controller and interface with hardware
+    pub fn new(periphs: Peripherals) -> Self {
+        let pins = arduino_hal::hal::Pins::new(
+            periphs.PORTB,
+            periphs.PORTC,
+            periphs.PORTD,
+            periphs.PORTE,
+            periphs.PORTF,
+        );
+
+        // Disable USB controller to prevent the production of spurious interrupts
+        periphs.USB_DEVICE.usbcon().reset();
+
+        init_millis(&periphs.TC0);
+
         Self {
-            sensorium: Sensorium::new(adc, pins.a2, pins.a3, pins.a4, pins.a5),
+            sensorium: Sensorium::new(periphs.ADC, pins.pf5, pins.pf4, pins.pf1, pins.pf0),
+
+            compressor: pins.pc6.into_output(),
+            heater: pins.pd7.into_output(),
+            _relay2: pins.pe6.into_output(),
+            master_120vac: pins.pb4.into_output(),
+
+            pwm: PWMController::new(periphs.TC1, pins.pb5, pins.pb6, pins.pb7, PWM_HZ),
+
+            rtc: DS1307::new(I2c::new(
+                periphs.TWI,
+                pins.pd1.into_pull_up_input(),
+                pins.pd0.into_pull_up_input(),
+                50_000,
+            )),
+            // Note: d13 is connected via a 1k resistor to d8, which, when d8 is set high, acts as a
+            // pull-up for the ds1307's open-drain oscillator output
+            _sqw: pins.pc7,
+
+            _pd2: pins.pd2,
+            _pd3: pins.pd3,
+            _pd5: pins.pd5,
+            _pe2: pins.pe2,
+            _pf6: pins.pf6,
+            _pf7: pins.pf7,
+
+            display: Display::new(pins.pd4, pins.pd6, pins.pb0, pins.pb1, pins.pb2, pins.pb3),
 
             next_sample: 0,
             next_update: 0,
             next_display: 0,
 
             target_temp: None,
-
-            compressor: Relay::new(pins.d5),
-            heater: Relay::new(pins.d6),
-            _relay2: Relay::new(pins.d7),
-            master_120vac: Relay::new(pins.d8),
-
-            pwm: PWMController::new(tc1, pins.d9, pins.d10, pins.d11, PWM_HZ),
-
-            rtc: DS1307::new(I2c::new(
-                twi,
-                pins.d2.into_pull_up_input(),
-                pins.d3.into_pull_up_input(),
-                50_000,
-            )),
-            // Note: d13 is connected via a 1k resistor to d8, which, when d8 is set high, acts as a
-            // pull-up for the ds1307's open-drain oscillator output
-            sqw: pins.d13,
-
-            _aux2: pins.a0,
-            _aux3: pins.a1,
-
-            display: Display::new(
-                pins.d4,
-                pins.d12,
-                pins.led_rx,
-                pins.sck,
-                pins.mosi,
-                pins.miso,
-            ),
         }
     }
 
@@ -239,7 +172,7 @@ impl ClimateController {
 
         self.target_temp = Some(target);
 
-        self.master_120vac.activate();
+        self.master_120vac.set_high();
 
         arduino_hal::delay_ms(500);
 
@@ -278,28 +211,28 @@ impl ClimateController {
         }
 
         if let Some(target) = self.target_temp {
-            let habitat_temp = self.sensorium.habitat_temp.fahrenheit();
-            let coolant_temp = self.sensorium.coolant_temp.fahrenheit();
-            let condenser_temp = self.sensorium.condenser_temp.fahrenheit();
-            let evaporator_temp = self.sensorium.evaporator_temp.fahrenheit();
+            let habitat_temp = self.sensorium.habitat_temp().fahrenheit();
+            let coolant_temp = self.sensorium.coolant_temp().fahrenheit();
+            let condenser_temp = self.sensorium.condenser_temp().fahrenheit();
+            let evaporator_temp = self.sensorium.evaporator_temp().fahrenheit();
 
             let ht_delta = habitat_temp - target;
             let ce_delta = coolant_temp - evaporator_temp;
 
-            if self.heater.is_active() {
+            if self.heater.is_set_high() {
                 if habitat_temp > target {
-                    self.heater.deactivate();
+                    self.heater.set_low();
                 }
             } else if habitat_temp < target - 1.0 {
-                self.heater.activate();
+                self.heater.set_high();
             }
 
-            if self.compressor.is_active() {
+            if self.compressor.is_set_high() {
                 if coolant_temp < target - 20.0 {
-                    self.compressor.deactivate();
+                    self.compressor.set_low();
                 }
             } else if coolant_temp > target - 5.0 {
-                self.compressor.activate();
+                self.compressor.set_high();
             }
 
             if condenser_temp > 80.0 {
@@ -331,10 +264,10 @@ impl ClimateController {
 
         let page = match (now / PAGE_SWAP_INTERVAL).rem_euclid(Page::COUNT as u32) {
             0 => Page::Temps(
-                self.sensorium.habitat_temp.fahrenheit(),
-                self.sensorium.coolant_temp.fahrenheit(),
-                self.sensorium.condenser_temp.fahrenheit(),
-                self.sensorium.evaporator_temp.fahrenheit(),
+                self.sensorium.habitat_temp().fahrenheit(),
+                self.sensorium.coolant_temp().fahrenheit(),
+                self.sensorium.condenser_temp().fahrenheit(),
+                self.sensorium.evaporator_temp().fahrenheit(),
             ),
             1 => Page::Time(self.rtc.get_time().map_err(|_| "Can't get RTC time!")),
             _ => unreachable!(),
@@ -348,14 +281,7 @@ impl ClimateController {
 #[entry]
 fn main() -> ! {
     let periphs = Peripherals::take().unwrap();
-    let pins = pins!(periphs);
-
-    // Disable USB controller to prevent the production of spurious interrupts
-    periphs.USB_DEVICE.usbcon().reset();
-
-    init_millis(&periphs.TC0);
-
-    let mut controller = ClimateController::new(pins, periphs.ADC, periphs.TC1, periphs.TWI);
+    let mut controller = ClimateController::new(periphs);
 
     // Safety: not called inside avr_device::interrupt::free
     unsafe { avr_device::interrupt::enable() };

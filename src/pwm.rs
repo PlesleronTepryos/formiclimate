@@ -11,29 +11,6 @@ use arduino_hal::{
     DefaultClock,
 };
 
-/// Initialize PWM clock at specified frequency
-pub fn init_pwm(tc1: &TC1, hz: u16) {
-    let top = (DefaultClock::FREQ / (hz as u32 * 2)) as u16;
-
-    tc1.tccr1a().write(|w| {
-        w.com1a().match_clear();
-        w.com1b().match_clear();
-        w.com1c().match_clear();
-        w.wgm1().set(0b10)
-    });
-
-    tc1.tccr1b().write(|w| {
-        w.wgm1().set(0b1);
-        w.cs1().direct()
-    });
-
-    tc1.icr1().write(|w| w.set(top));
-
-    tc1.ocr1a().write(|w| w.set(0));
-    tc1.ocr1b().write(|w| w.set(0));
-    tc1.ocr1c().write(|w| w.set(0));
-}
-
 /// 3-channel PWM controller built atop [TC1]
 ///
 /// Output pins are:
