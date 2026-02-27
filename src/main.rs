@@ -8,7 +8,7 @@
 
 use arduino_hal::{
     entry,
-    hal::port::{PB4, PC6, PC7, PD2, PD3, PD5, PD7, PE2, PE6, PF6, PF7},
+    hal::port::{PB4, PC6, PC7, PD4, PD5, PD6, PD7, PE2, PE6, PF6, PF7},
     port::{
         mode::{Floating, Input, Output},
         Pin,
@@ -51,54 +51,57 @@ const TARGET_TEMP: f32 = 57.5;
 /// - `PB1`: LCD D5
 /// - `PB2`: LCD D6
 /// - `PB3`: LCD D7
-/// - `PB4`: relay 3 (master 120V)
-/// - `PB5`: PWM Channel A
-/// - `PB6`: PWM Channel B
-/// - `PB7`: PWM Channel C
+/// - `PB4`: unused
+/// - `PB5`: PWM channel A (condenser fan)
+/// - `PB6`: PWM channel B (enclosure fan)
+/// - `PB7`: PWM channel C (circulation pump)
 ///
 /// `PORTC`:
-/// - `PC6`: relay 0 (compressor)
+/// - `PC6`: unused
 /// - `PC7`: RTC square wave input
 ///
 /// `PORTD`:
 /// - `PD0`: I2C SCL
 /// - `PD1`: I2C SDA
-/// - `PD2`: unused
-/// - `PD3`: unused
-/// - `PD4`: LCD enable
-/// - `PD5`: unused; board modified to break this pin out to the factory NC pin that would be A7
-/// - `PD6`: LCD RS
-/// - `PD7`: relay 1 (heater)
+/// - `PD2`: LCD RS
+/// - `PD3`: LCD enable
+/// - `PD4`: relay 0 (compressor)
+/// - `PD5`: relay 1 (heater)[^1]
+/// - `PD6`: relay 2 (wired but unused)
+/// - `PD7`: relay 3 (master 120V)
 ///
 /// `PORTE`:
-/// - `PE2`: unused; board modified to break this pin out to the factory NC pin that would be A6
-/// - `PE6`: relay 2 (not yet used)
+/// - `PE2`: unused[^2]
+/// - `PE6`: unused
 ///
 /// `PORTF`:
-/// - `PF0`: thermistor (mounted on evaporator)
-/// - `PF1`: thermistor (mounted on condenser)
-/// - `PF4`: thermistor (mounted on formicarium)
-/// - `PF5`: thermistor (mounted in coolant loop)
+/// - `PF0`: thermistor (evaporator)
+/// - `PF1`: thermistor (condenser)
+/// - `PF4`: thermistor (formicarium)
+/// - `PF5`: thermistor (coolant loop)
 /// - `PF6`: unused
 /// - `PF7`: unused
+///
+/// [^1]: board modified to break `PD5` out to the factory NC pin that would be A7\
+/// [^2]: board modified to break `PE2` out to the factory NC pin that would be A6
 #[must_use]
 pub struct ClimateController {
     sensorium: Sensorium,
 
-    compressor: Pin<Output, PC6>,
-    heater: Pin<Output, PD7>,
-    _relay2: Pin<Output, PE6>,
-    master_120vac: Pin<Output, PB4>,
+    compressor: Pin<Output, PD4>,
+    heater: Pin<Output, PD5>,
+    _relay2: Pin<Output, PD6>,
+    master_120vac: Pin<Output, PD7>,
 
     pwm: PWMController,
 
     rtc: DS1307,
     _sqw: Pin<Input<Floating>, PC7>,
 
-    _pd2: Pin<Input<Floating>, PD2>,
-    _pd3: Pin<Input<Floating>, PD3>,
-    _pd5: Pin<Input<Floating>, PD5>,
+    _pb4: Pin<Input<Floating>, PB4>,
+    _pc6: Pin<Input<Floating>, PC6>,
     _pe2: Pin<Input<Floating>, PE2>,
+    _pe6: Pin<Input<Floating>, PE6>,
     _pf6: Pin<Input<Floating>, PF6>,
     _pf7: Pin<Input<Floating>, PF7>,
 
@@ -130,10 +133,10 @@ impl ClimateController {
         Self {
             sensorium: Sensorium::new(periphs.ADC, pins.pf5, pins.pf4, pins.pf1, pins.pf0),
 
-            compressor: pins.pc6.into_output(),
-            heater: pins.pd7.into_output(),
-            _relay2: pins.pe6.into_output(),
-            master_120vac: pins.pb4.into_output(),
+            compressor: pins.pd4.into_output(),
+            heater: pins.pd5.into_output(),
+            _relay2: pins.pd6.into_output(),
+            master_120vac: pins.pd7.into_output(),
 
             pwm: PWMController::new(periphs.TC1, pins.pb5, pins.pb6, pins.pb7, PWM_HZ),
 
@@ -147,14 +150,14 @@ impl ClimateController {
             // pull-up for the ds1307's open-drain oscillator output
             _sqw: pins.pc7,
 
-            _pd2: pins.pd2,
-            _pd3: pins.pd3,
-            _pd5: pins.pd5,
+            _pb4: pins.pb4,
+            _pc6: pins.pc6,
             _pe2: pins.pe2,
+            _pe6: pins.pe6,
             _pf6: pins.pf6,
             _pf7: pins.pf7,
 
-            display: Display::new(pins.pd4, pins.pd6, pins.pb0, pins.pb1, pins.pb2, pins.pb3),
+            display: Display::new(pins.pd2, pins.pd3, pins.pb0, pins.pb1, pins.pb2, pins.pb3),
 
             next_sample: 0,
             next_update: 0,

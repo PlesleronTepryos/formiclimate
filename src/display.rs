@@ -3,7 +3,7 @@
 use core::mem::discriminant;
 
 use arduino_hal::{
-    hal::port::{PB0, PB1, PB2, PB3, PD4, PD6},
+    hal::port::{PB0, PB1, PB2, PB3, PD2, PD3},
     port::{
         mode::{Floating, Input, Output},
         Pin,
@@ -37,8 +37,8 @@ impl Page {
 /// Note: optimized for binary size at the cost of generic utility
 #[must_use]
 pub struct Display {
-    rs: Pin<Output, PD6>,
-    en: Pin<Output, PD4>,
+    rs: Pin<Output, PD2>,
+    en: Pin<Output, PD3>,
     d4: Pin<Output, PB0>,
     d5: Pin<Output, PB1>,
     d6: Pin<Output, PB2>,
@@ -50,21 +50,22 @@ pub struct Display {
 
 impl Display {
     /// Construct the display
+    #[expect(clippy::similar_names, reason = "I didn't name the pins")]
     pub fn new(
-        d4: Pin<Input<Floating>, PD4>,
-        d12: Pin<Input<Floating>, PD6>,
-        led_rx: Pin<Input<Floating>, PB0>,
-        sck: Pin<Input<Floating>, PB1>,
-        mosi: Pin<Input<Floating>, PB2>,
-        miso: Pin<Input<Floating>, PB3>,
+        pd2: Pin<Input<Floating>, PD2>,
+        pd3: Pin<Input<Floating>, PD3>,
+        pb0: Pin<Input<Floating>, PB0>,
+        pb1: Pin<Input<Floating>, PB1>,
+        pb2: Pin<Input<Floating>, PB2>,
+        pb3: Pin<Input<Floating>, PB3>,
     ) -> Self {
         Self {
-            rs: d12.into_output(),
-            en: d4.into_output(),
-            d4: led_rx.into_output(),
-            d5: sck.into_output(),
-            d6: mosi.into_output(),
-            d7: miso.into_output(),
+            rs: pd2.into_output(),
+            en: pd3.into_output(),
+            d4: pb0.into_output(),
+            d5: pb1.into_output(),
+            d6: pb2.into_output(),
+            d7: pb3.into_output(),
 
             page: Page::Blank,
             needs_clear: false,
