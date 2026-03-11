@@ -1,8 +1,11 @@
 //! ds1307 RTC abstractions and API
 
-use arduino_hal::{prelude::*, I2c};
+use core::marker::PhantomData;
 
-type I2cResult<T = ()> = Result<T, arduino_hal::i2c::Error>;
+use arduino_hal::{i2c::Direction, prelude::*, I2c};
+
+/// Blanket result type for I2c-related operations
+pub type I2cResult<T = ()> = Result<T, arduino_hal::i2c::Error>;
 
 const DS1307_ADDR: u8 = 0x68;
 
@@ -10,15 +13,19 @@ const DS1307_ADDR: u8 = 0x68;
 ///
 /// No internal state; can be freely constructed/destructed if the I2c bus must be shared
 #[must_use]
-pub struct DS1307 {
+pub struct DS1307<RAM = [u8; 56]> {
     i2c: I2c,
+    _ram: PhantomData<RAM>,
 }
 
-// Specialized methods
-impl DS1307 {
+// Misc clock functions
+impl<RAM> DS1307<RAM> {
     /// Connect to ds1307 by taking ownership of the I2C bus
     pub const fn new(i2c: I2c) -> Self {
-        Self { i2c }
+        Self {
+            i2c,
+            _ram: PhantomData,
+        }
     }
 
     /// Disconnect to release the I2C bus
@@ -27,25 +34,48 @@ impl DS1307 {
         self.i2c
     }
 
-    /// Corrects any illogical values in time data on-chip
+    /// Returns `true` if the clock responds to a ping
+    pub fn is_connected(&mut self) -> bool {
+        self.i2c.ping_device(DS1307_ADDR, Direction::Read).is_ok()
+    }
+
+    /// Checks time data on-chip, corrects any invalid values, and returns whether corrections were
+    /// made
     ///
     /// # Errors
     /// Returns an error if the something goes wrong on the I2C bus
-    pub fn validate(&mut self) -> I2cResult {
+    pub fn validate(&mut self) -> I2cResult<bool> {
         let mut buf = [0u8; 7];
         self.i2c.write_read(DS1307_ADDR, &[0], &mut buf)?;
 
-        let seconds = Seconds::try_from_bcd(buf[0]).unwrap_or_default();
-        let minutes = Minutes::try_from_bcd(buf[1]).unwrap_or_default();
-        let hours = Hours::try_from_bcd(buf[2]).unwrap_or_default();
-        let day = Day::try_from_bcd(buf[3]).unwrap_or_default();
-        let mut date = Date::try_from_bcd(buf[4]).unwrap_or_default();
-        let month = Month::try_from_bcd(buf[5]).unwrap_or_default();
-        let year = Year::try_from_bcd(buf[6]).unwrap_or_default();
+        let mut valid = true;
 
-        if date.bin() > month.length(year.is_leap()) {
-            date = Date(1);
-        }
+        let year = Year::try_from_bcd(buf[6])
+            .inspect_err(|_| valid = false)
+            .unwrap_or_default();
+        let month = Month::try_from_bcd(buf[5])
+            .inspect_err(|_| valid = false)
+            .unwrap_or_default();
+        let date = Date::try_from_bcd_with_ym(buf[4], year, month)
+            .inspect_err(|_| valid = false)
+            .unwrap_or_default();
+        let day = Day::try_from_bcd(buf[3])
+            .inspect_err(|_| valid = false)
+            .map(|day| {
+                let true_day = Day::from_ymd(year, month, date);
+                valid &= day == true_day;
+                true_day
+            })
+            .unwrap_or_default();
+        let hours = Hours::try_from_bcd(buf[2])
+            .inspect_err(|_| valid = false)
+            .unwrap_or_default();
+        let minutes = Minutes::try_from_bcd(buf[1])
+            .inspect_err(|_| valid = false)
+            .unwrap_or_default();
+        let seconds = Seconds::try_from_bcd(buf[0])
+            .inspect_err(|_| valid = false)
+            .unwrap_or_default();
 
         let valid_buf = RTCTime {
             seconds,
@@ -58,15 +88,15 @@ impl DS1307 {
         }
         .as_write();
 
-        self.i2c.write(DS1307_ADDR, &valid_buf)
+        self.i2c.write(DS1307_ADDR, &valid_buf).map(|()| valid)
     }
 
-    /// Zero out the time and date to the earliest valid value
+    /// Reset the clock to [`RTCTime::EPOCH`]
     ///
     /// # Errors
     /// Returns an error if the something goes wrong on the I2C bus
     pub fn clear_clock(&mut self) -> I2cResult {
-        let buf = RTCTime::default().as_write();
+        let buf = RTCTime::EPOCH.as_write();
         self.i2c.write(DS1307_ADDR, &buf)
     }
 
@@ -131,34 +161,10 @@ impl DS1307 {
         self.i2c
             .write(DS1307_ADDR, &[7, (control[0] & 0xfc) | freq as u8])
     }
-
-    /// Get entire RAM block
-    ///
-    /// # Errors
-    /// Returns an error if the something goes wrong on the I2C bus
-    pub fn get_ram(&mut self) -> I2cResult<[u8; 56]> {
-        let mut buf = [0u8; 56];
-        self.i2c
-            .write_read(DS1307_ADDR, &[8], &mut buf)
-            .map(|()| buf)
-    }
-
-    /// Set entire RAM block
-    ///
-    /// # Errors
-    /// Returns an error if the something goes wrong on the I2C bus
-    #[expect(clippy::manual_memcpy, reason = "no_std")]
-    pub fn set_ram(&mut self, ram: [u8; 56]) -> I2cResult {
-        let mut buf = [0u8; 57];
-        for i in 1..57 {
-            buf[i] = ram[i - 1];
-        }
-        self.i2c.write(DS1307_ADDR, &buf)
-    }
 }
 
 // Time getters
-impl DS1307 {
+impl<RAM> DS1307<RAM> {
     /// Get complete date and time reading
     ///
     /// # Errors
@@ -249,7 +255,7 @@ impl DS1307 {
 }
 
 // Time setters
-impl DS1307 {
+impl<RAM> DS1307<RAM> {
     /// Set complete date and time reading
     ///
     /// # Errors
@@ -315,6 +321,117 @@ impl DS1307 {
     }
 }
 
+// RAM-related methods
+impl DS1307<[u8; 56]> {
+    /// Get entire RAM block
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    pub fn get_ram(&mut self) -> I2cResult<[u8; 56]> {
+        let mut buf = [0u8; 56];
+        self.i2c
+            .write_read(DS1307_ADDR, &[8], &mut buf)
+            .map(|()| buf)
+    }
+
+    /// Set entire RAM block
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    #[expect(clippy::manual_memcpy, reason = "no_std")]
+    pub fn set_ram(&mut self, ram: [u8; 56]) -> I2cResult {
+        let mut buf = [0u8; 57];
+        for i in 1..57 {
+            buf[i] = ram[i - 1];
+        }
+        buf[0] = 8;
+        self.i2c.write(DS1307_ADDR, &buf)
+    }
+
+    /// Read a specified byte from RAM
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    ///
+    /// # Panics
+    /// Panics if the index is outside the range 0..56
+    pub fn get_byte(&mut self, i: u8) -> I2cResult<u8> {
+        assert!((0..56).contains(&i), "Invalid byte index!");
+        let mut buf = [0u8];
+        self.i2c
+            .write_read(DS1307_ADDR, &[8 + i], &mut buf)
+            .map(|()| buf[0])
+    }
+
+    /// Write a specified byte to RAM
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    ///
+    /// # Panics
+    /// Panics if the index is outside the range 0..56
+    pub fn set_byte(&mut self, i: u8, byte: u8) -> I2cResult {
+        assert!((0..56).contains(&i), "Invalid byte index!");
+        self.i2c.write(DS1307_ADDR, &[8 + i, byte])
+    }
+
+    /// Read a specified aligned word from RAM in little-endian
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    ///
+    /// # Panics
+    /// Panics if the index is outside the range 0..28
+    pub fn get_word(&mut self, i: u8) -> I2cResult<u16> {
+        assert!((0..28).contains(&i), "Invalid word index!");
+        let mut buf = [0u8; 2];
+        self.i2c
+            .write_read(DS1307_ADDR, &[8 + i], &mut buf)
+            .map(|()| u16::from_le_bytes(buf))
+    }
+
+    /// Write a specified aligned word to RAM in little-endian
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    ///
+    /// # Panics
+    /// Panics if the index is outside the range 0..28
+    pub fn set_word(&mut self, i: u8, word: u16) -> I2cResult {
+        assert!((0..28).contains(&i), "Invalid word index!");
+        let [b0, b1] = word.to_le_bytes();
+        self.i2c.write(DS1307_ADDR, &[8 + i, b0, b1])
+    }
+
+    /// Read a specified aligned dword from RAM in little-endian
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    ///
+    /// # Panics
+    /// Panics if the index is outside the range 0..14
+    pub fn get_dword(&mut self, i: u8) -> I2cResult<u32> {
+        assert!((0..14).contains(&i), "Invalid dword index!");
+        let mut buf = [0u8; 4];
+        self.i2c
+            .write_read(DS1307_ADDR, &[8 + i], &mut buf)
+            .map(|()| u32::from_le_bytes(buf))
+    }
+
+    /// Write a specified aligned dword to RAM in little-endian
+    ///
+    /// # Errors
+    /// Returns an error if the something goes wrong on the I2C bus
+    ///
+    /// # Panics
+    /// Panics if the index is outside the range 0..14
+    pub fn set_dword(&mut self, i: u8, dword: u32) -> I2cResult {
+        assert!((0..14).contains(&i), "Invalid dword index!");
+        let [b0, b1, b2, b3] = dword.to_le_bytes();
+        self.i2c.write(DS1307_ADDR, &[8 + i, b0, b1, b2, b3])
+    }
+}
+
 /// Square wave freqency selection
 #[expect(missing_docs, reason = "self-explanatory variants")]
 #[derive(Debug, Clone, Copy)]
@@ -327,15 +444,15 @@ pub enum Freq {
 }
 
 impl Freq {
-    /// Construct from binary representation; panics if out of range
+    /// Construct from binary representation; all but the lowest two bits of the input are ignored
     #[must_use]
     pub const fn from_bits(bits: u8) -> Self {
-        match bits {
+        match bits & 0b11 {
             0 => Self::Hz1,
             1 => Self::Hz4096,
             2 => Self::Hz8192,
             3 => Self::Hz32768,
-            _ => panic!(),
+            _ => unreachable!(),
         }
     }
 }
@@ -344,6 +461,7 @@ impl Freq {
 #[expect(missing_docs, reason = "self-explanatory variants")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
+#[must_use]
 pub struct RTCTime {
     pub seconds: Seconds,
     pub minutes: Minutes,
@@ -355,6 +473,34 @@ pub struct RTCTime {
 }
 
 impl RTCTime {
+    /// 2000.01.01 00:00:00
+    ///
+    /// The earliest representable date on the [`DS1307`]
+    pub const EPOCH: Self = Self {
+        seconds: Seconds(0),
+        minutes: Minutes(0),
+        hours: Hours(0),
+        day: Day::Saturday,
+        date: Date(1),
+        month: Month::January,
+        year: Year(0),
+    };
+
+    /// Convenience constructor for midnight (00:00:00) on a given date
+    pub const fn new_date(year: u8, month: Month, date: u8) -> Self {
+        let year = Year::from_bin(year);
+        let date = Date::from_bin(date);
+        Self {
+            seconds: Seconds(0),
+            minutes: Minutes(0),
+            hours: Hours(0),
+            day: Day::from_ymd(year, month, date),
+            date,
+            month,
+            year,
+        }
+    }
+
     /// Construct from BCD representation
     ///
     /// # Errors
@@ -386,7 +532,6 @@ impl RTCTime {
     }
 
     /// Construct from BCD representation; panics if invalid or out of range
-    #[must_use]
     pub const fn from_bcd(bytes: [u8; 7]) -> Self {
         if let Ok(v) = Self::try_from_bcd(bytes) {
             return v;
@@ -417,6 +562,21 @@ impl RTCTime {
             i += 1;
         }
         buf
+    }
+
+    /// The number of seconds that have passed since the [`DS1307`]'s zero date: Jan 1, 2000
+    #[must_use]
+    pub const fn to_epoch_secs(self) -> u32 {
+        let minutes = (self.hours.bin() as u16) * 60 + self.minutes.bin() as u16;
+        let seconds = (minutes as u32) * 60 + self.seconds.bin() as u32;
+        let year = self.year.bin();
+        let past_leap_days = (year - 1) >> 2;
+        let days = year as u16 * 365
+            + past_leap_days as u16
+            + self.month.offset(self.year.is_leap())
+            + (self.date.bin() - 1) as u16;
+
+        seconds + days as u32 * 86_400
     }
 }
 
@@ -659,6 +819,19 @@ impl Day {
         panic!();
     }
 
+    /// Get the correct day of week for a given [`Year`], [`Month`], and [`Date`]
+    #[must_use]
+    pub const fn from_ymd(year: Year, month: Month, date: Date) -> Self {
+        let n_year = year.bin();
+        let past_leap_days = (n_year - 1) >> 2;
+        let days = n_year as u16 * 365
+            + past_leap_days as u16
+            + month.offset(year.is_leap())
+            + (date.bin() - 1) as u16;
+
+        Self::from_bcd((days + 6).rem_euclid(7) as u8 + 1)
+    }
+
     /// Name of [Day] as text
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -712,6 +885,23 @@ impl Date {
     /// Returns an error if the value is out of range or is invalid BCD
     pub const fn try_from_bcd(bcd: u8) -> Result<Self, u8> {
         if bcd != 0 && bcd <= 0x31 && bcd & 0xf <= 9 {
+            Ok(Self(bcd))
+        } else {
+            Err(bcd)
+        }
+    }
+
+    /// Construct from BCD representation; additionally check validity against a given [`Year`] and
+    /// [`Month`]
+    ///
+    /// # Errors
+    /// Returns an error if the value is out of range or is invalid BCD
+    pub const fn try_from_bcd_with_ym(bcd: u8, year: Year, month: Month) -> Result<Self, u8> {
+        if bcd != 0
+            && bcd <= 0x31
+            && bcd & 0xf <= 9
+            && decode_bcd6b(bcd) < month.length(year.is_leap())
+        {
             Ok(Self(bcd))
         } else {
             Err(bcd)
@@ -877,6 +1067,39 @@ impl Month {
             Self::November => 0x11,
             Self::December => 0x12,
         }
+    }
+
+    /// The starting day offset from the beginning of the year
+    #[must_use]
+    pub const fn offset(self, leap: bool) -> u16 {
+        let base = match self {
+            Self::January => 0,
+            Self::February => 31,
+            Self::March => 59,
+            Self::April => 90,
+            Self::May => 120,
+            Self::June => 151,
+            Self::July => 181,
+            Self::August => 212,
+            Self::September => 243,
+            Self::October => 273,
+            Self::November => 304,
+            Self::December => 334,
+        };
+
+        if leap && self as u8 >= 3 {
+            base + 1
+        } else {
+            base
+        }
+    }
+
+    /// The day of the year for the `n`th day in a month; panics if `n` is not a valid for the month
+    #[must_use]
+    pub const fn nth(self, n: u8, leap: bool) -> u16 {
+        assert!(n >= 1 && n <= self.length(leap), "invalid nth day of month");
+
+        self.offset(leap) + n as u16
     }
 }
 

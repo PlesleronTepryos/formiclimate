@@ -1,2 +1,5 @@
 /target
 Cargo.lock
+
+# Ignore output of avr-objdump
+*dump.txt

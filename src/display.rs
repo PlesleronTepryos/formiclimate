@@ -1,7 +1,5 @@
 //! Display subsystem
 
-use core::mem::discriminant;
-
 use arduino_hal::{
     hal::port::{PB0, PB1, PB2, PB3, PD2, PD3},
     port::{
@@ -10,26 +8,190 @@ use arduino_hal::{
     },
 };
 
-use crate::rtc::RTCTime;
-
-const BLANK_LINE: &str = "                    ";
-
-/// A page being displayed on the LCD
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Page {
-    /// Nothing; [Display] always starts on this page
-    Blank,
-
-    /// Temperature Readouts
-    Temps(f32, f32, f32, f32),
-
-    /// Current time according to RTC, or an error if time is unavailable
-    Time(Result<RTCTime, &'static str>),
+/// Tool for building a page's layout before sending it to the display
+#[must_use]
+#[repr(C)]
+pub struct PageBuilder {
+    data: [u8; 80],
+    pos: u8,
 }
 
-impl Page {
-    /// The number of informational page variants; used for periodic page swaps
-    pub const COUNT: usize = core::mem::variant_count::<Self>() - 1;
+impl PageBuilder {
+    /// Create a new blank page to write on
+    pub const fn new() -> Self {
+        Self {
+            data: [b' '; 80],
+            pos: 0,
+        }
+    }
+
+    /// Write an arbitrary byte to the page, moving the cursor by 1
+    ///
+    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
+    /// reaches the end of the last line, subsequent bytes are dropped
+    pub const fn byte(mut self, byte: u8) -> Self {
+        if self.pos < 80 {
+            self.data[self.pos as usize] = byte;
+            self.pos += 1;
+        }
+        self
+    }
+
+    /// Write a hexadecimal digit in ascii to the page, moving the cursor by 1
+    ///
+    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
+    /// reaches the end of the last line, subsequent bytes are dropped
+    pub const fn hexit(self, value: u8) -> Self {
+        self.byte(hexit(value))
+    }
+
+    /// Write a pair of hexadecimal digits in ascii to the page, moving the cursor by 2
+    ///
+    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
+    /// reaches the end of the last line, subsequent bytes are dropped
+    pub const fn hexit2(self, value: u8) -> Self {
+        self.write(&[hexit(value >> 4), hexit(value & 0xf)])
+    }
+
+    /// Prints a floating point value in the range `[-999.99, 999.99]` at the current position,
+    /// padded so that the cursor always moves by 7 characters
+    ///
+    /// Leading zeroes are omitted and the sign always appears immediately before the first nonzero
+    /// leading digit, or the decimal point if there is none
+    pub const fn decimal(self, value: f32) -> Self {
+        if value.is_nan() {
+            return self.write(b"    NaN");
+        }
+
+        let sign = if value.is_sign_negative() { b'-' } else { b' ' };
+
+        if value.is_infinite() {
+            return self.write(b"   ").byte(sign).write(b"Inf");
+        }
+
+        let mut value = value.abs();
+
+        let mut out_bytes = [
+            sign,
+            hexit({
+                let mut hundreds = 0;
+                while value >= 100.0 {
+                    hundreds += 1;
+                    value -= 100.0;
+                }
+                hundreds
+            }),
+            hexit({
+                let mut tens = 0;
+                while value >= 10.0 {
+                    tens += 1;
+                    value -= 10.0;
+                }
+                tens
+            }),
+            hexit({
+                let mut ones = 0;
+                while value >= 1.0 {
+                    ones += 1;
+                    value -= 1.0;
+                }
+                ones
+            }),
+            b'.',
+            hexit({
+                let mut tenths = 0;
+                while value >= 0.1 {
+                    tenths += 1;
+                    value -= 0.1;
+                }
+                tenths
+            }),
+            hexit({
+                let mut hundredths = 0;
+                while value >= 0.01 {
+                    hundredths += 1;
+                    value -= 0.01;
+                }
+                hundredths
+            }),
+        ];
+
+        let mut i = 1;
+        while i < 4 && out_bytes[i] == b'0' {
+            out_bytes[i - 1] = b' ';
+            out_bytes[i] = sign;
+            i += 1;
+        }
+
+        self.write(&out_bytes)
+    }
+
+    /// Write a series of bytes to the page, moving the cursor by `bytes.len()`
+    ///
+    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
+    /// reaches the end of the last line, remaining bytes are dropped
+    pub const fn write(mut self, bytes: &[u8]) -> Self {
+        let mut i = 0;
+        while self.pos < 80 && i < bytes.len() {
+            self.data[self.pos as usize] = bytes[i];
+            self.pos += 1;
+            i += 1;
+        }
+        self
+    }
+
+    /// Fills the remainder of the current line with blank space and moves to the next line; this is
+    /// a no-op at the very beginning of a line
+    pub const fn end_line(mut self) -> Self {
+        self.pos = self.pos.next_multiple_of(20);
+        self
+    }
+
+    /// Jumps cursor to the beginning of next line uncondtionally
+    pub const fn next_line(mut self) -> Self {
+        if self.pos < 80 {
+            self.pos = (self.pos + 1).next_multiple_of(20);
+        }
+        self
+    }
+
+    /// Finalize the page
+    pub const fn finish(self) -> PageData {
+        PageData {
+            data: self.data,
+            _filler: 0,
+        }
+    }
+}
+
+impl Default for PageBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A complete page ready to be sent to the display
+#[must_use]
+#[repr(C)]
+pub struct PageData {
+    data: [u8; 80],
+    _filler: u8,
+}
+
+impl PageData {
+    /// A completely blank page
+    pub const BLANK: Self = Self {
+        data: [b' '; 80],
+        _filler: 0,
+    };
+
+    /// Rewrite the existing page data
+    pub const fn rewrite(self) -> PageBuilder {
+        PageBuilder {
+            data: self.data,
+            pos: 0,
+        }
+    }
 }
 
 /// Climate controller display subsystem
@@ -44,8 +206,7 @@ pub struct Display {
     d6: Pin<Output, PB2>,
     d7: Pin<Output, PB3>,
 
-    page: Page,
-    needs_clear: bool,
+    page: PageData,
 }
 
 impl Display {
@@ -67,8 +228,7 @@ impl Display {
             d6: pb2.into_output(),
             d7: pb3.into_output(),
 
-            page: Page::Blank,
-            needs_clear: false,
+            page: PageData::BLANK,
         }
     }
 
@@ -108,19 +268,12 @@ impl Display {
 
     fn set_pos(&mut self, col: u8, row: u8) {
         const OFFSETS: [u8; 4] = [0x00, 0x40, 0x14, 0x54];
-        let pos = col + OFFSETS[(row & 0x3) as usize];
-        self.command(0x80 | pos);
+        self.command(0x80 | (col + OFFSETS[(row & 0x3) as usize]));
         arduino_hal::delay_us(100);
     }
 
     fn command(&mut self, cmd: u8) {
         self.send8(cmd, false);
-    }
-
-    fn print(&mut self, text: &str) {
-        for ch in text.chars() {
-            self.write(ch as u8);
-        }
     }
 
     fn write(&mut self, value: u8) {
@@ -168,138 +321,71 @@ impl Display {
         self.en.set_low();
     }
 
-    /// Set the page and associated data to be drawn on the next refresh
-    pub fn set_page(&mut self, page: Page) {
-        if discriminant(&page) != discriminant(&self.page) {
-            self.needs_clear = true;
-        }
-        self.page = page;
-    }
-
-    /// Refresh the display, drawing the currently set page if it has changed since the last refresh
-    pub fn refresh(&mut self) {
-        if self.needs_clear {
-            self.clear();
-        }
-
-        match self.page {
-            Page::Blank => {}
-            Page::Temps(habitat, coolant, condenser, evaporator) => {
-                self.print_temp(0, "Habitat:    ", habitat, self.needs_clear);
-                self.print_temp(1, "Coolant:    ", coolant, self.needs_clear);
-                self.print_temp(2, "Condenser:  ", condenser, self.needs_clear);
-                self.print_temp(3, "Evaporator: ", evaporator, self.needs_clear);
-            }
-            Page::Time(Ok(time)) => {
-                // 1st row: |Today is DayName    |
-                // 2nd row: |YYYY.MM.DD  HH:MM:SS|
-
-                self.set_pos(0, 0);
-                self.print("Today is ");
-                self.print(time.day.name());
-
-                self.set_pos(0, 1);
-                self.print("20");
-                self.print_bcd(time.year.bcd());
-                self.print(".");
-                self.print_bcd(time.month.bcd());
-                self.print(".");
-                self.print_bcd(time.date.bcd());
-                self.print("  ");
-                self.print_bcd(time.hours.bcd_24h());
-                self.print(":");
-                self.print_bcd(time.minutes.bcd());
-                self.print(":");
-                self.print_bcd(time.seconds.bcd());
-            }
-            Page::Time(Err(msg)) => {
-                self.set_pos(0, 0);
-                self.print(msg);
-                self.set_pos(0, 1);
-                self.print(BLANK_LINE);
-                self.set_pos(0, 2);
-                self.print(BLANK_LINE);
-            }
-        }
-
-        self.needs_clear = false;
-    }
-
-    fn print_temp(&mut self, row: u8, title: &str, temp: f32, first: bool) {
-        if first {
-            self.set_pos(0, row);
-            self.print(title);
-        } else {
-            self.set_pos(title.len() as u8, row);
-        }
-
-        self.print_float(temp);
-
-        self.print("F");
-    }
-
-    /// Prints a 2-digit BCD value
-    fn print_bcd(&mut self, value: u8) {
-        self.print(digit(value >> 4));
-        self.print(digit(value & 0xf));
-    }
-
-    /// Prints a floating point value in the range `[-999.99, 999.99]` at the current position,
-    /// padded so that the number always occupies 7 characters and ends at the hundredths position
+    /// Write an entire page worth of data to the display
     ///
-    /// Leading zeroes are omitted and the sign always appears immediately before the first nonzero
-    /// leading digit, or the decimal point if there is none
-    fn print_float(&mut self, value: f32) {
-        let sign = if value.is_sign_negative() { "-" } else { " " };
-        let value = value.abs();
-        let hundreds = (libm::floorf(value / 100.0) as u8).rem_euclid(10);
-        let tens = (libm::floorf(value / 10.0) as u8).rem_euclid(10);
-        let ones = (value as u8).rem_euclid(10);
-        let tenths = ((value - libm::floorf(value)) * 10.0) as u8;
-        let hundredths = ((value * 10.0 - libm::floorf(value * 10.0)) * 10.0) as u8;
+    /// # Performance
+    /// Execution time is variable based on how much of the new page is different from the last and
+    /// how the differences are arranged. Roughly speaking, this function takes
+    /// `([characters changed] + [runs of unchanged characters]) * 100`us
+    ///
+    /// In the worst case, this will take ~8-9ms in either of two cases:
+    /// - if every single character in the new page is different from the last (80 new characters)
+    /// - if every other character is different (40 new characters with 40 unchanged runs between)
+    ///
+    /// Any other situation will take less time, down to ~400us with a completely identical page
+    pub fn write_page(&mut self, page: PageData) {
+        let mut i = 0;
+        let mut col = 0;
+        let mut row = 0;
 
-        match (hundreds, tens, ones) {
-            (0, 0, 0) => {
-                self.print("   ");
-                self.print(sign);
+        self.set_pos(col, row);
+        let mut skip = false;
+
+        while i < 80 {
+            let byte = page.data[i];
+            if byte == self.page.data[i] {
+                skip = true;
+            } else {
+                if skip {
+                    self.set_pos(col, row);
+                    skip = false;
+                }
+                self.write(byte);
             }
-            (0, 0, _) => {
-                self.print("  ");
-                self.print(sign);
-                self.print(digit(ones));
-            }
-            (0, _, _) => {
-                self.print(" ");
-                self.print(sign);
-                self.print(digit(tens));
-                self.print(digit(ones));
-            }
-            (_, _, _) => {
-                self.print(sign);
-                self.print(digit(hundreds));
-                self.print(digit(tens));
-                self.print(digit(ones));
+
+            i += 1;
+            col += 1;
+
+            if col == 20 {
+                col = 0;
+                row += 1;
+                self.set_pos(col, row);
+                skip = false;
             }
         }
 
-        self.print(".");
-        self.print(digit(tenths));
-        self.print(digit(hundredths));
+        self.page = page;
     }
 }
 
-const fn digit(digit: u8) -> &'static str {
-    match digit {
-        0 => "0",
-        1 => "1",
-        2 => "2",
-        3 => "3",
-        4 => "4",
-        5 => "5",
-        6 => "6",
-        7 => "7",
-        8 => "8",
-        9 => "9",
+const fn hexit(hexit: u8) -> u8 {
+    match hexit & 0xf {
+        0x0 => b'0',
+        0x1 => b'1',
+        0x2 => b'2',
+        0x3 => b'3',
+        0x4 => b'4',
+        0x5 => b'5',
+        0x6 => b'6',
+        0x7 => b'7',
+        0x8 => b'8',
+        0x9 => b'9',
+        0xa => b'A',
+        0xb => b'B',
+        0xc => b'C',
+        0xd => b'D',
+        0xe => b'E',
+        0xf => b'F',
         _ => unreachable!(),
     }
 }
