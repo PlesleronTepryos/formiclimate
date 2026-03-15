@@ -565,6 +565,9 @@ impl RTCTime {
     }
 
     /// The number of seconds that have passed since the [`DS1307`]'s zero date: Jan 1, 2000
+    ///
+    /// Since the year field rolls over every 100 years (3.16 billion seconds), this will never
+    /// exceed the capacity of a [`u32`]
     #[must_use]
     pub const fn to_epoch_secs(self) -> u32 {
         let minutes = (self.hours.bin() as u16) * 60 + self.minutes.bin() as u16;

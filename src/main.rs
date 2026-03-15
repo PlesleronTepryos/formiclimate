@@ -434,6 +434,8 @@ pub struct ClimateController {
     config: ControllerConfig,
 
     page_id: PageId,
+
+    compressor_check_time: Option<u32>,
 }
 
 impl ClimateController {
@@ -492,6 +494,8 @@ impl ClimateController {
             config: DEFAULT_CONFIG,
 
             page_id: PageId::TimeAndTarget,
+
+            compressor_check_time: None,
         }
     }
 
@@ -520,6 +524,17 @@ impl ClimateController {
         let _ = self.rtc.set_ram(self.config.into_data());
     }
 
+    fn activate_compressor(&mut self, overtemp: bool, now: u32) {
+        if self.compressor_check_time.is_some_and(|t| now < t + 1000) {
+            return;
+        }
+
+        self.compressor.set_high();
+        self.config.min_effective_coolant_delta += if overtemp { 0.5 } else { -0.1 };
+
+        self.compressor_check_time = Some(now + 60_000);
+    }
+
     fn set_condenser_fan_duty(&mut self, duty: f32) {
         self.pwm.set_duty_a(duty);
     }
@@ -532,7 +547,7 @@ impl ClimateController {
         self.pwm.set_duty_c(duty);
     }
 
-    fn update(&mut self) {
+    fn update(&mut self, now: u32) {
         if let Some(target) = self.target_temp.value() {
             let habitat_temp = self.sensorium.habitat_temp().fahrenheit();
             let coolant_temp = self.sensorium.coolant_temp().fahrenheit();
@@ -556,12 +571,9 @@ impl ClimateController {
             // If the habitat temp exceeds the target by too much, the coolant is too warm to
             // extract heat effectively
             } else if habitat_temp > target + 0.25 {
-                self.compressor.set_high();
-                self.config.min_effective_coolant_delta =
-                    (target - coolant_temp).max(self.config.min_effective_coolant_delta + 0.5);
+                self.activate_compressor(true, now);
             } else if coolant_temp > target - self.config.min_effective_coolant_delta {
-                self.compressor.set_high();
-                self.config.min_effective_coolant_delta -= 0.1;
+                self.activate_compressor(false, now);
             }
 
             // Fail-safe: max out the condenser fan in case of condenser temp sensor failure to
@@ -675,7 +687,7 @@ impl ClimateController {
         }
 
         if now >= self.next_update {
-            self.update();
+            self.update(now);
             self.next_update += UPDATE_INTERVAL;
         }
 
@@ -692,6 +704,18 @@ impl ClimateController {
         if now >= self.next_page_swap {
             self.page_id.next();
             self.next_page_swap += PAGE_SWAP_INTERVAL;
+        }
+
+        // If the condenser hasn't gotten hot in the first minute after the compressor was switched
+        // on, then the compressor relay must have failed to make contact (known issue; planning to
+        // switch to solid state control in the future). Currently the temporary solution is to
+        // cycle the relay and check back in after another minute
+        if self.compressor_check_time.is_some_and(|t| now >= t) {
+            if self.sensorium.condenser_temp().fahrenheit() > 83.0 {
+                self.compressor_check_time = None;
+            } else {
+                self.compressor.set_low();
+            }
         }
     }
 }
