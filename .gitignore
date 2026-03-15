@@ -1,5 +1,6 @@
 /target
 Cargo.lock
+*.code-workspace
 
-# Ignore output of avr-objdump
-*dump.txt
+# Exclude output of avr-objdump, avr-nm, etc.
+/.dumps

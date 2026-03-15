@@ -253,7 +253,7 @@ impl ControllerConfig {
         }
 
         let hour = time.hours.bin();
-        let clock_hour = if hour > 12 { hour - 12 } else { hour };
+        let clock_hour = if hour < 12 { hour } else { hour - 12 };
         let secs_of_hour = time.seconds.bin() as u16 + time.minutes.bin() as u16 * 60;
 
         let diurnal_cycle_temp = if clock_hour >= 6 {
