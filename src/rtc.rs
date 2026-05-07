@@ -2,7 +2,8 @@
 
 use core::marker::PhantomData;
 
-use arduino_hal::{i2c::Direction, prelude::*, I2c};
+use arduino_hal::{i2c::Direction, I2c};
+use embedded_hal::i2c::{I2c as I2cTrait, Operation};
 
 /// Blanket result type for I2c-related operations
 pub type I2cResult<T = ()> = Result<T, arduino_hal::i2c::Error>;
@@ -77,7 +78,7 @@ impl<RAM> DS1307<RAM> {
             .inspect_err(|_| valid = false)
             .unwrap_or_default();
 
-        let valid_buf = RTCTime {
+        let valid_time = RTCTime {
             seconds,
             minutes,
             hours,
@@ -85,10 +86,9 @@ impl<RAM> DS1307<RAM> {
             date,
             month,
             year,
-        }
-        .as_write();
+        };
 
-        self.i2c.write(DS1307_ADDR, &valid_buf).map(|()| valid)
+        self.set_time(valid_time).map(|()| valid)
     }
 
     /// Reset the clock to [`RTCTime::EPOCH`]
@@ -96,8 +96,7 @@ impl<RAM> DS1307<RAM> {
     /// # Errors
     /// Returns an error if the something goes wrong on the I2C bus
     pub fn clear_clock(&mut self) -> I2cResult {
-        let buf = RTCTime::EPOCH.as_write();
-        self.i2c.write(DS1307_ADDR, &buf)
+        self.set_time(RTCTime::EPOCH)
     }
 
     /// Set the clock halt bit to disable timekeeping
@@ -126,7 +125,7 @@ impl<RAM> DS1307<RAM> {
     /// Returns an error if the something goes wrong on the I2C bus
     pub fn sqw_enable(&mut self) -> I2cResult {
         let mut control = [0u8];
-        self.i2c.read(DS1307_ADDR, &mut control)?;
+        self.i2c.write_read(DS1307_ADDR, &[7], &mut control)?;
         self.i2c.write(DS1307_ADDR, &[7, control[0] | 0b0001_0000])
     }
 
@@ -136,7 +135,7 @@ impl<RAM> DS1307<RAM> {
     /// Returns an error if the something goes wrong on the I2C bus
     pub fn sqw_disable(&mut self) -> I2cResult {
         let mut control = [0u8];
-        self.i2c.read(DS1307_ADDR, &mut control)?;
+        self.i2c.write_read(DS1307_ADDR, &[7], &mut control)?;
         self.i2c.write(DS1307_ADDR, &[7, control[0] & 0b1110_1111])
     }
 
@@ -147,7 +146,7 @@ impl<RAM> DS1307<RAM> {
     pub fn sqw_get_freq(&mut self) -> I2cResult<Freq> {
         let mut control = [0u8];
         self.i2c
-            .read(DS1307_ADDR, &mut control)
+            .write_read(DS1307_ADDR, &[7], &mut control)
             .map(|()| Freq::from_bits(control[0] & 0x3))
     }
 
@@ -157,7 +156,7 @@ impl<RAM> DS1307<RAM> {
     /// Returns an error if the something goes wrong on the I2C bus
     pub fn sqw_set_freq(&mut self, freq: Freq) -> I2cResult {
         let mut control = [0u8];
-        self.i2c.read(DS1307_ADDR, &mut control)?;
+        self.i2c.write_read(DS1307_ADDR, &[7], &mut control)?;
         self.i2c
             .write(DS1307_ADDR, &[7, (control[0] & 0xfc) | freq as u8])
     }
@@ -261,7 +260,10 @@ impl<RAM> DS1307<RAM> {
     /// # Errors
     /// Returns an error if the something goes wrong on the I2C bus
     pub fn set_time(&mut self, time: RTCTime) -> I2cResult {
-        self.i2c.write(DS1307_ADDR, &time.as_write())
+        self.i2c.transaction(
+            DS1307_ADDR,
+            &mut [Operation::Write(&[0]), Operation::Write(&time.bcd())],
+        )
     }
 
     /// Set seconds
@@ -338,14 +340,11 @@ impl DS1307<[u8; 56]> {
     ///
     /// # Errors
     /// Returns an error if the something goes wrong on the I2C bus
-    #[expect(clippy::manual_memcpy, reason = "no_std")]
     pub fn set_ram(&mut self, ram: [u8; 56]) -> I2cResult {
-        let mut buf = [0u8; 57];
-        for i in 1..57 {
-            buf[i] = ram[i - 1];
-        }
-        buf[0] = 8;
-        self.i2c.write(DS1307_ADDR, &buf)
+        self.i2c.transaction(
+            DS1307_ADDR,
+            &mut [Operation::Write(&[8]), Operation::Write(&ram)],
+        )
     }
 
     /// Read a specified byte from RAM
@@ -553,17 +552,6 @@ impl RTCTime {
         ]
     }
 
-    const fn as_write(self) -> [u8; 8] {
-        let time = self.bcd();
-        let mut buf = [0u8; 8];
-        let mut i = 1;
-        while i < 8 {
-            buf[i] = time[i - 1];
-            i += 1;
-        }
-        buf
-    }
-
     /// The number of seconds that have passed since the [`DS1307`]'s zero date: Jan 1, 2000
     ///
     /// Since the year field rolls over every 100 years (3.16 billion seconds), this will never
@@ -573,7 +561,7 @@ impl RTCTime {
         let minutes = (self.hours.bin() as u16) * 60 + self.minutes.bin() as u16;
         let seconds = (minutes as u32) * 60 + self.seconds.bin() as u32;
         let year = self.year.bin();
-        let past_leap_days = (year - 1) >> 2;
+        let past_leap_days = (year + 3) >> 2;
         let days = year as u16 * 365
             + past_leap_days as u16
             + self.month.offset(self.year.is_leap())
@@ -712,16 +700,16 @@ impl Hours {
     pub const fn try_from_bcd(bcd: u8) -> Result<Self, u8> {
         match bcd >> 6 {
             // 24-hour format check
-            0 if bcd <= 0x24 && bcd & 0xf <= 9 => Ok(Self(bcd)),
+            0 if bcd <= 0x23 && bcd & 0xf <= 9 => Ok(Self(bcd)),
 
             // 12-hour format check
             1 if bcd != 0 && bcd & 0x1f <= 0x12 && bcd & 0xf <= 9 => {
-                // AM hours are unchanged except 12AM becomes 0
+                // AM: 12AM = 0, 1-11AM strip mode bits
                 if bcd & 0x20 == 0 {
-                    if bcd == 0x12 {
+                    if bcd & 0x1f == 0x12 {
                         Ok(Self(0))
                     } else {
-                        Ok(Self(bcd))
+                        Ok(Self(bcd & 0x1f))
                     }
                 // 8PM & 9PM require a half-carry (+6) to convert to 24-hour format
                 } else if bcd & 0xf >= 8 {
@@ -730,7 +718,7 @@ impl Hours {
                 } else if bcd & 0x1f != 0x12 {
                     Ok(Self((bcd & 0x1f) + 0x12))
                 } else {
-                    Ok(Self(bcd))
+                    Ok(Self(bcd & 0x1f))
                 }
             }
 
@@ -777,7 +765,17 @@ impl Hours {
     /// Returns value as 12-hour BCD
     #[must_use]
     pub const fn bcd_12h(self) -> u8 {
-        unimplemented!()
+        let h = self.bin();
+        let pm = h >= 12;
+        let h12 = if h == 0 || h == 12 {
+            12u8
+        } else if h < 12 {
+            h
+        } else {
+            h - 12
+        };
+        let bcd_h12 = if h12 >= 10 { h12 - 10 + 0x10 } else { h12 };
+        0x40 | (if pm { 0x20 } else { 0 }) | bcd_h12
     }
 }
 
@@ -826,7 +824,7 @@ impl Day {
     #[must_use]
     pub const fn from_ymd(year: Year, month: Month, date: Date) -> Self {
         let n_year = year.bin();
-        let past_leap_days = (n_year - 1) >> 2;
+        let past_leap_days = (n_year + 3) >> 2;
         let days = n_year as u16 * 365
             + past_leap_days as u16
             + month.offset(year.is_leap())
@@ -846,6 +844,20 @@ impl Day {
             Self::Thursday => "Thursday",
             Self::Friday => "Friday",
             Self::Saturday => "Saturday",
+        }
+    }
+
+    /// 3-letter abbreviation of [Day]
+    #[must_use]
+    pub const fn abbrev(self) -> &'static str {
+        match self {
+            Self::Sunday => "Sun",
+            Self::Monday => "Mon",
+            Self::Tuesday => "Tue",
+            Self::Wednesday => "Wed",
+            Self::Thursday => "Thu",
+            Self::Friday => "Fri",
+            Self::Saturday => "Sat",
         }
     }
 
@@ -903,7 +915,7 @@ impl Date {
         if bcd != 0
             && bcd <= 0x31
             && bcd & 0xf <= 9
-            && decode_bcd6b(bcd) < month.length(year.is_leap())
+            && decode_bcd6b(bcd) <= month.length(year.is_leap())
         {
             Ok(Self(bcd))
         } else {
@@ -942,9 +954,84 @@ impl Date {
     }
 
     /// Returns value as BCD
+    ///
+    /// Strips the metadata bits in bits 6-7; safe to write directly to the RTC
     #[must_use]
     pub const fn bcd(self) -> u8 {
-        self.0
+        self.0 & 0x3f
+    }
+
+    /// Ordinal suffix for the date ("st", "nd", "rd", or "th")
+    #[must_use]
+    pub const fn suffix(self) -> &'static [u8] {
+        if (self.0 & 0x30) == 0x10 {
+            b"th"
+        } else {
+            match self.0 & 0xf {
+                1 => b"st",
+                2 => b"nd",
+                3 => b"rd",
+                _ => b"th",
+            }
+        }
+    }
+
+    /// The month length limit encoded in bits 6-7 (28-31)
+    ///
+    /// When no trim is encoded (bits are 0), returns 31
+    #[must_use]
+    pub const fn limit(self) -> u8 {
+        31 - (self.0 >> 6)
+    }
+
+    /// Encode a month length limit in bits 6-7, clamping the date if it exceeds the limit
+    ///
+    /// Panics if `limit` is not in `28..=31`
+    #[must_use]
+    pub const fn with_limit(self, limit: u8) -> Self {
+        let bcd = self.0 & 0x3f;
+        match limit {
+            28 => Self(0xc0 | if bcd > 0x28 { 0x28 } else { bcd }),
+            29 => Self(0x80 | if bcd > 0x29 { 0x29 } else { bcd }),
+            30 => Self(0x40 | if bcd > 0x30 { 0x30 } else { bcd }),
+            31 => Self(if bcd > 0x31 { 0x31 } else { bcd }),
+            _ => panic!("limit out of range"),
+        }
+    }
+
+    /// Clear the month length limit from bits 6-7
+    #[must_use]
+    pub const fn clear_limit(self) -> Self {
+        Self(self.0 & 0x3f)
+    }
+
+    /// Increment the date by one, saturating at the encoded limit (or 31 if none)
+    #[must_use]
+    pub const fn next(self) -> Self {
+        let bcd = self.0 & 0x3f;
+        let limit_bcd = match self.0 >> 6 {
+            0 => 0x31,
+            1 => 0x30,
+            2 => 0x29,
+            _ => 0x28,
+        };
+        if bcd >= limit_bcd {
+            self
+        } else {
+            Self((self.0 & 0xc0) | (bcd + if bcd & 0x0f == 9 { 7 } else { 1 }))
+        }
+    }
+
+    /// Decrement the date by one, saturating at 1
+    #[must_use]
+    #[expect(clippy::verbose_bit_mask, reason = "interpretability")]
+    pub const fn prev(self) -> Self {
+        let bcd = self.0 & 0x3f;
+        if bcd <= 0x01 {
+            self
+        } else {
+            Self((self.0 & 0xc0) | (bcd - if bcd & 0x0f == 0 { 7 } else { 1 }))
+        }
     }
 }
 
@@ -1031,6 +1118,25 @@ impl Month {
         }
     }
 
+    /// 3-letter abbreviation of [Month]
+    #[must_use]
+    pub const fn abbrev(self) -> &'static str {
+        match self {
+            Self::January => "Jan",
+            Self::February => "Feb",
+            Self::March => "Mar",
+            Self::April => "Apr",
+            Self::May => "May",
+            Self::June => "Jun",
+            Self::July => "Jul",
+            Self::August => "Aug",
+            Self::September => "Sep",
+            Self::October => "Oct",
+            Self::November => "Nov",
+            Self::December => "Dec",
+        }
+    }
+
     /// Returns value as BCD
     #[must_use]
     pub const fn length(self, leap: bool) -> u8 {
@@ -1097,7 +1203,45 @@ impl Month {
         }
     }
 
-    /// The day of the year for the `n`th day in a month; panics if `n` is not a valid for the month
+    /// The next month, wrapping from December to January
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::January => Self::February,
+            Self::February => Self::March,
+            Self::March => Self::April,
+            Self::April => Self::May,
+            Self::May => Self::June,
+            Self::June => Self::July,
+            Self::July => Self::August,
+            Self::August => Self::September,
+            Self::September => Self::October,
+            Self::October => Self::November,
+            Self::November => Self::December,
+            Self::December => Self::January,
+        }
+    }
+
+    /// The previous month, wrapping from January to December
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::January => Self::December,
+            Self::February => Self::January,
+            Self::March => Self::February,
+            Self::April => Self::March,
+            Self::May => Self::April,
+            Self::June => Self::May,
+            Self::July => Self::June,
+            Self::August => Self::July,
+            Self::September => Self::August,
+            Self::October => Self::September,
+            Self::November => Self::October,
+            Self::December => Self::November,
+        }
+    }
+
+    /// The day of the year for the `n`th day in a month; panics if `n` is not valid for the month
     #[must_use]
     pub const fn nth(self, n: u8, leap: bool) -> u16 {
         assert!(n >= 1 && n <= self.length(leap), "invalid nth day of month");

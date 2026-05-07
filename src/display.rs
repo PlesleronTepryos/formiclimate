@@ -8,6 +8,8 @@ use arduino_hal::{
     },
 };
 
+use crate::utils::{hexit, u16_to_f32};
+
 /// Tool for building a page's layout before sending it to the display
 #[must_use]
 #[repr(C)]
@@ -18,6 +20,7 @@ pub struct PageBuilder {
 
 impl PageBuilder {
     /// Create a new blank page to write on
+    #[inline(never)]
     pub const fn new() -> Self {
         Self {
             data: [b' '; 80],
@@ -29,6 +32,7 @@ impl PageBuilder {
     ///
     /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
     /// reaches the end of the last line, subsequent bytes are dropped
+    #[inline(never)]
     pub const fn byte(mut self, byte: u8) -> Self {
         if self.pos < 80 {
             self.data[self.pos as usize] = byte;
@@ -49,6 +53,7 @@ impl PageBuilder {
     ///
     /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
     /// reaches the end of the last line, subsequent bytes are dropped
+    #[inline(never)]
     pub const fn hexit2(self, value: u8) -> Self {
         self.write(&[hexit(value >> 4), hexit(value & 0xf)])
     }
@@ -59,77 +64,116 @@ impl PageBuilder {
     /// Leading zeroes are omitted and the sign always appears immediately before the first nonzero
     /// leading digit, or the decimal point if there is none
     pub const fn decimal(self, value: f32) -> Self {
-        if value.is_nan() {
-            return self.write(b"    NaN");
-        }
+        let [b0, b1, b2, b3] = value.to_le_bytes();
+        let sign = if b3 >> 7 == 1 { b'-' } else { b' ' };
+        let abs_b3 = b3 & 0x7F;
 
-        let sign = if value.is_sign_negative() { b'-' } else { b' ' };
+        let mut out_bytes;
+        self.write(if abs_b3 == 0x7F && b2 >> 7 == 1 {
+            if b2 & 0x7f != 0 || b1 != 0 || b0 != 0 {
+                b"    NaN"
+            } else if sign == b'-' {
+                b"   -Inf"
+            } else {
+                b"    Inf"
+            }
+        } else {
+            let abs = f32::from_le_bytes([b0, b1, b2, abs_b3]);
 
-        if value.is_infinite() {
-            return self.write(b"   ").byte(sign).write(b"Inf");
-        }
+            let trunc = abs as u16;
+            let frac = ((abs - u16_to_f32(trunc)) * 100.0) as u8;
 
-        let mut value = value.abs();
+            let ones = (trunc % 10) as u8;
+            let tens = (trunc / 10) as u8;
 
-        let mut out_bytes = [
-            sign,
-            hexit({
-                let mut hundreds = 0;
-                while value >= 100.0 {
-                    hundreds += 1;
-                    value -= 100.0;
-                }
-                hundreds
-            }),
-            hexit({
-                let mut tens = 0;
-                while value >= 10.0 {
-                    tens += 1;
-                    value -= 10.0;
-                }
-                tens
-            }),
-            hexit({
-                let mut ones = 0;
-                while value >= 1.0 {
-                    ones += 1;
-                    value -= 1.0;
-                }
-                ones
-            }),
-            b'.',
-            hexit({
-                let mut tenths = 0;
-                while value >= 0.1 {
-                    tenths += 1;
-                    value -= 0.1;
-                }
-                tenths
-            }),
-            hexit({
-                let mut hundredths = 0;
-                while value >= 0.01 {
-                    hundredths += 1;
-                    value -= 0.01;
-                }
-                hundredths
-            }),
-        ];
+            out_bytes = [
+                sign,
+                b'0' + tens / 10,
+                b'0' + tens % 10,
+                b'0' + ones,
+                b'.',
+                b'0' + frac / 10,
+                b'0' + frac % 10,
+            ];
 
-        let mut i = 1;
-        while i < 4 && out_bytes[i] == b'0' {
-            out_bytes[i - 1] = b' ';
-            out_bytes[i] = sign;
-            i += 1;
-        }
+            let mut i = 1;
+            while i < 4 && out_bytes[i] == b'0' {
+                out_bytes[i - 1] = b' ';
+                out_bytes[i] = sign;
+                i += 1;
+            }
 
-        self.write(&out_bytes)
+            &out_bytes
+        })
+    }
+
+    /// Prints an unsigned integer right-aligned in exactly 6 characters
+    pub const fn uint(self, value: u16) -> Self {
+        let mut out_bytes;
+        self.write(if value == 0 {
+            b"     0"
+        } else {
+            let ones_and_tens = (value % 100) as u8;
+            let rest = value / 100;
+            let hund_and_thou = (rest % 100) as u8;
+
+            out_bytes = [
+                b' ',
+                b'0' + (rest / 100) as u8,
+                b'0' + hund_and_thou / 10,
+                b'0' + hund_and_thou % 10,
+                b'0' + ones_and_tens / 10,
+                b'0' + ones_and_tens % 10,
+            ];
+
+            let mut i = 1;
+            while i < 5 && out_bytes[i] == b'0' {
+                out_bytes[i] = b' ';
+                i += 1;
+            }
+
+            &out_bytes
+        })
+    }
+
+    /// Prints a signed integer right-aligned in exactly 6 characters
+    pub const fn sint(self, value: i16) -> Self {
+        let sign = if value < 0 { b'-' } else { b' ' };
+        let abs_value = value.unsigned_abs();
+
+        let mut out_bytes;
+        self.write(if abs_value == 0 {
+            b"     0"
+        } else {
+            let ones_and_tens = (abs_value % 100) as u8;
+            let rest = abs_value / 100;
+            let hund_and_thou = (rest % 100) as u8;
+
+            out_bytes = [
+                sign,
+                b'0' + (rest / 100) as u8,
+                b'0' + hund_and_thou / 10,
+                b'0' + hund_and_thou % 10,
+                b'0' + ones_and_tens / 10,
+                b'0' + ones_and_tens % 10,
+            ];
+
+            let mut i = 1;
+            while i < 5 && out_bytes[i] == b'0' {
+                out_bytes[i - 1] = b' ';
+                out_bytes[i] = sign;
+                i += 1;
+            }
+
+            &out_bytes
+        })
     }
 
     /// Write a series of bytes to the page, moving the cursor by `bytes.len()`
     ///
     /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
     /// reaches the end of the last line, remaining bytes are dropped
+    #[inline(never)]
     pub const fn write(mut self, bytes: &[u8]) -> Self {
         let mut i = 0;
         while self.pos < 80 && i < bytes.len() {
@@ -140,18 +184,44 @@ impl PageBuilder {
         self
     }
 
+    /// Skips ahead by `n` characters
+    #[inline(never)]
+    pub const fn skip(mut self, n: u8) -> Self {
+        self.pos += n;
+        if self.pos > 80 {
+            self.pos = 80;
+        }
+        self
+    }
+
     /// Fills the remainder of the current line with blank space and moves to the next line; this is
     /// a no-op at the very beginning of a line
+    #[inline(never)]
     pub const fn end_line(mut self) -> Self {
-        self.pos = self.pos.next_multiple_of(20);
+        self.pos = if self.pos <= 20 {
+            20
+        } else if self.pos <= 40 {
+            40
+        } else if self.pos <= 60 {
+            60
+        } else {
+            80
+        };
         self
     }
 
     /// Jumps cursor to the beginning of next line uncondtionally
+    #[inline(never)]
     pub const fn next_line(mut self) -> Self {
-        if self.pos < 80 {
-            self.pos = (self.pos + 1).next_multiple_of(20);
-        }
+        self.pos = if self.pos < 20 {
+            20
+        } else if self.pos < 40 {
+            40
+        } else if self.pos < 60 {
+            60
+        } else {
+            80
+        };
         self
     }
 
@@ -281,6 +351,7 @@ impl Display {
         arduino_hal::delay_us(100);
     }
 
+    #[inline(never)]
     fn send8(&mut self, byte: u8, mode: bool) {
         if mode {
             self.rs.set_high();
@@ -328,7 +399,7 @@ impl Display {
     /// how the differences are arranged. Roughly speaking, this function takes
     /// `([characters changed] + [runs of unchanged characters]) * 100`us
     ///
-    /// In the worst case, this will take ~8-9ms in either of two cases:
+    /// At worst, this will take ~8-9ms in either of two cases:
     /// - if every single character in the new page is different from the last (80 new characters)
     /// - if every other character is different (40 new characters with 40 unchanged runs between)
     ///
@@ -338,8 +409,7 @@ impl Display {
         let mut col = 0;
         let mut row = 0;
 
-        self.set_pos(col, row);
-        let mut skip = false;
+        let mut skip = true;
 
         while i < 80 {
             let byte = page.data[i];
@@ -359,33 +429,10 @@ impl Display {
             if col == 20 {
                 col = 0;
                 row += 1;
-                self.set_pos(col, row);
-                skip = false;
+                skip = true;
             }
         }
 
         self.page = page;
-    }
-}
-
-const fn hexit(hexit: u8) -> u8 {
-    match hexit & 0xf {
-        0x0 => b'0',
-        0x1 => b'1',
-        0x2 => b'2',
-        0x3 => b'3',
-        0x4 => b'4',
-        0x5 => b'5',
-        0x6 => b'6',
-        0x7 => b'7',
-        0x8 => b'8',
-        0x9 => b'9',
-        0xa => b'A',
-        0xb => b'B',
-        0xc => b'C',
-        0xd => b'D',
-        0xe => b'E',
-        0xf => b'F',
-        _ => unreachable!(),
     }
 }
