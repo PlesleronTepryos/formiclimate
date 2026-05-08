@@ -18,6 +18,7 @@ use arduino_hal::{
 };
 use panic_halt as _;
 
+mod codegen;
 pub mod control;
 pub mod display;
 pub mod encoder;
@@ -45,577 +46,7 @@ const CONFIG_INTERVAL: u32 = 1000;
 
 const CALIBRATION_PERIOD: u32 = 2000;
 
-macro_rules! extract {
-    ($data:ident, $offset:ident, bool) => {{
-        let b0 = $data[$offset];
-        $offset += 1;
-        match b0 {
-            0 => false,
-            1 => true,
-            _ => return Err($data),
-        }
-    }};
-    ($data:ident, $offset:ident, u8) => {{
-        let b0 = $data[$offset];
-        $offset += 1;
-        b0
-    }};
-    ($data:ident, $offset:ident, u16) => {{
-        let [b0, b1] = [$data[$offset], $data[$offset + 1]];
-        $offset += 2;
-        u16::from_le_bytes([b0, b1])
-    }};
-    ($data:ident, $offset:ident, u32) => {{
-        let [b0, b1, b2, b3] = [
-            $data[$offset],
-            $data[$offset + 1],
-            $data[$offset + 2],
-            $data[$offset + 3],
-        ];
-        $offset += 4;
-        u32::from_le_bytes([b0, b1, b2, b3])
-    }};
-    ($data:ident, $offset:ident, i8) => {{
-        let b0 = $data[$offset];
-        $offset += 1;
-        b0 as i8
-    }};
-    ($data:ident, $offset:ident, i16) => {{
-        let [b0, b1] = [$data[$offset], $data[$offset + 1]];
-        $offset += 2;
-        i16::from_le_bytes([b0, b1])
-    }};
-    ($data:ident, $offset:ident, i32) => {{
-        let [b0, b1, b2, b3] = [
-            $data[$offset],
-            $data[$offset + 1],
-            $data[$offset + 2],
-            $data[$offset + 3],
-        ];
-        $offset += 4;
-        i32::from_le_bytes([b0, b1, b2, b3])
-    }};
-    ($data:ident, $offset:ident, f32) => {{
-        let [b0, b1, b2, b3] = [
-            $data[$offset],
-            $data[$offset + 1],
-            $data[$offset + 2],
-            $data[$offset + 3],
-        ];
-        $offset += 4;
-        f32::from_le_bytes([b0, b1, b2, b3])
-    }};
-    ($data:ident, $offset:ident, Month) => {{
-        let b0 = $data[$offset];
-        $offset += 1;
-        if let Ok(month) = Month::try_from_bcd(b0) {
-            month
-        } else {
-            return Err($data);
-        }
-    }};
-    ($data:ident, $offset:ident, Date) => {{
-        let b0 = $data[$offset];
-        $offset += 1;
-        if let Ok(date) = Date::try_from_bcd(b0) {
-            date
-        } else {
-            return Err($data);
-        }
-    }};
-}
-
-macro_rules! inject {
-    ($name:ident, $data:ident, $offset:ident, bool) => {
-        $data[$offset] = $name as u8;
-        $offset += 1;
-    };
-    ($name:ident, $data:ident, $offset:ident, u8) => {
-        $data[$offset] = $name;
-        $offset += 1;
-    };
-    ($name:ident, $data:ident, $offset:ident, u16) => {
-        [$data[$offset], $data[$offset + 1]] = $name.to_le_bytes();
-        $offset += 2;
-    };
-    ($name:ident, $data:ident, $offset:ident, u32) => {
-        [
-            $data[$offset],
-            $data[$offset + 1],
-            $data[$offset + 2],
-            $data[$offset + 3],
-        ] = $name.to_le_bytes();
-        $offset += 4;
-    };
-    ($name:ident, $data:ident, $offset:ident, i8) => {
-        $data[$offset] = $name as u8;
-        $offset += 1;
-    };
-    ($name:ident, $data:ident, $offset:ident, i16) => {
-        [$data[$offset], $data[$offset + 1]] = $name.to_le_bytes();
-        $offset += 2;
-    };
-    ($name:ident, $data:ident, $offset:ident, i32) => {
-        [
-            $data[$offset],
-            $data[$offset + 1],
-            $data[$offset + 2],
-            $data[$offset + 3],
-        ] = $name.to_le_bytes();
-        $offset += 4;
-    };
-    ($name:ident, $data:ident, $offset:ident, f32) => {
-        [
-            $data[$offset],
-            $data[$offset + 1],
-            $data[$offset + 2],
-            $data[$offset + 3],
-        ] = $name.to_le_bytes();
-        $offset += 4;
-    };
-    ($name:ident, $data:ident, $offset:ident, Month) => {
-        $data[$offset] = $name.bcd();
-        $offset += 1;
-    };
-    ($name:ident, $data:ident, $offset:ident, Date) => {
-        $data[$offset] = $name.bcd();
-        $offset += 1;
-    };
-}
-
-// Keeping this around for the sake of leaving room for more complex serialization logic
-/* macro_rules! build_injector {
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @) => {
-        $($stmts)*
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, bool; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            $data[$offset] = $name as u8; }
-            $offset + 1, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, u8; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            $data[$offset] = $name; }
-            $offset + 1, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, u16; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            [$data[$offset], $data[$offset + 1]] = $name.to_le_bytes(); }
-            $offset + 2, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, u32; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            [$data[$offset], $data[$offset + 1], $data[$offset + 2], $data[$offset + 3]] = $name.to_le_bytes(); }
-            $offset + 4, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, i8; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            $data[$offset] = $name as u8; }
-            $offset + 1, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, i16; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            [$data[$offset], $data[$offset + 1]] = $name.to_le_bytes(); }
-            $offset + 2, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, i32; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            [$data[$offset], $data[$offset + 1], $data[$offset + 2], $data[$offset + 3]] = $name.to_le_bytes(); }
-            $offset + 4, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, f32; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            [$data[$offset], $data[$offset + 1], $data[$offset + 2], $data[$offset + 3]] = $name.to_le_bytes(); }
-            $offset + 4, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, Month; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            $data[$offset] = $name.bcd(); }
-            $offset + 1, $data
-            @ $($tail)*
-        )
-    };
-    ({ $($stmts:stmt)* } $offset:expr, $data:ident @ $name:ident, Date; $($tail:tt)*) => {
-        build_injector!(
-            { $($stmts)*
-            $data[$offset] = $name.bcd(); }
-            $offset + 1, $data
-            @ $($tail)*
-        )
-    };
-} */
-
-macro_rules! incrementor {
-    ($value:ident, bool) => {
-        !$value
-    };
-    ($value:ident, u8) => {
-        $value.saturating_add(1)
-    };
-    ($value:ident, u16) => {
-        $value.saturating_add(1)
-    };
-    ($value:ident, u32) => {
-        $value.saturating_add(1)
-    };
-    ($value:ident, i8) => {
-        $value.saturating_add(1)
-    };
-    ($value:ident, i16) => {
-        $value.saturating_add(1)
-    };
-    ($value:ident, i32) => {
-        $value.saturating_add(1)
-    };
-    ($value:ident, f32) => {
-        $value + 0.25
-    };
-    ($value:ident, Month) => {
-        $value.next()
-    };
-    ($value:ident, Date) => {
-        $value.next()
-    };
-    ($value:ident, Duty) => {
-        $value.next()
-    };
-}
-
-macro_rules! decrementor {
-    ($value:ident, bool) => {
-        !$value
-    };
-    ($value:ident, u8) => {
-        $value.saturating_sub(1)
-    };
-    ($value:ident, u16) => {
-        $value.saturating_sub(1)
-    };
-    ($value:ident, u32) => {
-        $value.saturating_sub(1)
-    };
-    ($value:ident, i8) => {
-        $value.saturating_sub(1)
-    };
-    ($value:ident, i16) => {
-        $value.saturating_sub(1)
-    };
-    ($value:ident, i32) => {
-        $value.saturating_sub(1)
-    };
-    ($value:ident, f32) => {
-        $value - 0.25
-    };
-    ($value:ident, Month) => {
-        $value.prev()
-    };
-    ($value:ident, Date) => {
-        $value.prev()
-    };
-    ($value:ident, Duty) => {
-        $value.prev()
-    };
-}
-
-macro_rules! draw_method {
-    ($value:expr, $page:ident, bool) => {
-        $page.write(if $value { b"      On" } else { b"     Off" })
-    };
-    ($value:expr, $page:ident, u8) => {
-        $page.skip(2).uint($value as u16)
-    };
-    ($value:expr, $page:ident, u16) => {
-        $page.skip(2).uint($value)
-    };
-    ($value:expr, $page:ident, u32) => {
-        $page.skip(2).uint($value as u16)
-    };
-    ($value:expr, $page:ident, i8) => {
-        $page.skip(2).sint($value as i16)
-    };
-    ($value:expr, $page:ident, i16) => {
-        $page.skip(2).sint($value)
-    };
-    ($value:expr, $page:ident, i32) => {
-        $page.skip(2).sint($value as i16)
-    };
-    ($value:expr, $page:ident, f32) => {
-        $page.decimal($value).byte(b'F')
-    };
-    ($value:expr, $page:ident, Month) => {
-        $page.skip(5).write($value.abbrev().as_bytes())
-    };
-    ($value:expr, $page:ident, Date) => {{
-        $page.skip(4).hexit2($value.bcd()).write($value.suffix())
-    }};
-    ($value:expr, $page:ident, Duty) => {
-        $page.skip(2).uint($value.0)
-    };
-}
-
-macro_rules! tooltip {
-    (bool) => {
-        b"R=[T,F]     S=toggle"
-    };
-    (u8) => {
-        b"R=[0,255]        S=1"
-    };
-    (u16) => {
-        b"R=[0,65535]      S=1"
-    };
-    (u32) => {
-        b"R=[0,~4.3B]      S=1"
-    };
-    (i8) => {
-        b"R=[-128,127]     S=1"
-    };
-    (i16) => {
-        b"R=[-32768,32767] S=1"
-    };
-    (i32) => {
-        b"R=[-2.15B,2.15B] S=1"
-    };
-    (f32) => {
-        b"R=[-999,999]  S=0.25"
-    };
-    (Month) => {
-        b"R=[Jan,Dec] S=1month"
-    };
-    (Date) => {
-        b"R=[1,[28-31]] S=1day"
-    };
-    (Duty) => {
-        b"R=[0,256]        S=1"
-    };
-}
-
-macro_rules! build_setter {
-    ($kind:ident match $buffer:ident {
-        $($arm_pat:pat => $arm_block:block),*
-     } $self_:ident @) => {
-        match $buffer {
-            $($arm_pat => $arm_block),*
-        }
-     };
-    ($kind:ident match $buffer:ident {
-        $($arm_pat:pat => $arm_block:block),*
-     } $self_:ident @ $disp_a:ident, $field_a:ident, Month; $disp_b:ident, $field_b:ident, Date; $($tail:tt)*) => {
-        build_setter!($kind match $buffer {
-            $($arm_pat => $arm_block,)*
-            $kind::$disp_a(x) => {
-                $self_.$field_a = x;
-                $self_.$field_b = $self_.$field_b.with_limit(x.length(false));
-            },
-            $kind::$disp_b(x) => {
-                $self_.$field_b = x;
-            }
-        }
-        $self_ @ $($tail)*)
-    };
-    ($kind:ident match $buffer:ident {
-        $($arm_pat:pat => $arm_block:block),*
-     } $self_:ident @ $disp_name:ident, $field_name:ident, $type:ty; $($tail:tt)*) => {
-        build_setter!($kind match $buffer {
-            $($arm_pat => $arm_block,)*
-            $kind::$disp_name(x) => {
-                $self_.$field_name = x;
-            }
-        }
-        $self_ @ $($tail)*)
-    };
-}
-
-macro_rules! portable {
-    (
-        $(#[$meta:meta])*
-        $vis:vis struct $name:ident {
-            $(
-                $(#[$field_meta:meta])*
-                $field_vis:vis $field_name:ident as $disp_name:ident : $field_type:tt = $default:expr
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$meta])*
-        $vis struct $name {
-            $(
-                $(#[$field_meta])*
-                $field_vis $field_name : $field_type,
-            )*
-        }
-
-        impl $name {
-            const DEFAULT: Self = Self {
-                $($field_name : $default,)*
-            };
-
-            const FIELD_COUNT: u8 = [$(stringify!($field_name)),*].len() as u8;
-
-            const NAMES: [[u8; 18]; Self::FIELD_COUNT as usize] = [$({
-                    let name = stringify!($disp_name).as_bytes();
-                    let mut buf = [b' '; 18];
-                    let mut i = 0;
-                    while i < name.len() {
-                        buf[i] = name[i];
-                        i += 1;
-                    }
-                    buf
-                }),*];
-
-            const SIGNATURE: u32 = {
-                let bytes = concat!($(stringify!($field_type)),*).as_bytes();
-                let mut sig: u32 = 0;
-                let mut i = 0;
-                while i < bytes.len() {
-                    let byte = bytes[i];
-                    let un = (byte >> 4) as u32;
-                    let ln = (byte & 0xf) as u32;
-                    sig ^= (1 << (un + 16)) | (1 << ln);
-                    sig = sig.rotate_left(1);
-                    i += 1;
-                }
-                sig
-            };
-
-            #[expect(unused_assignments, reason = "macro expansion leaves trailing offset increment")]
-            #[inline(never)]
-            const fn from_data(data: [u8; 56]) -> Result<Self, [u8; 56]> {
-                let data_sig = u32::from_le_bytes([data[52], data[53], data[54], data[55]]);
-                if data_sig == Self::SIGNATURE {
-                    let mut offset = 0;
-                    Ok(Self{$($field_name: extract!(data, offset, $field_type)),*})
-                } else {
-                    Err(data)
-                }
-            }
-
-            #[expect(unused_assignments, reason = "macro expansion leaves trailing offset increment")]
-            #[inline(never)]
-            const fn into_data(self) -> [u8;56] {
-                let Self {$($field_name),*} = self;
-                let mut data = [0;56];
-                let mut offset = 0;
-                $(inject!($field_name, data, offset, $field_type);)*
-                //build_injector!({} 0, data @ $($field_name, $field_type;)*);
-                [data[52], data[53], data[54], data[55]] = Self::SIGNATURE.to_le_bytes();
-                data
-            }
-
-            const fn get_field(&self, index: u8) -> Option<FieldBuffer> {
-                if index == 0 { return None; }
-                match index - 1 {
-                    $(
-                        ${index()} => Some(FieldBuffer::$disp_name(self.$field_name)),
-                    )*
-                    _ => None
-                }
-            }
-
-            const fn set_field(&mut self, buffer: FieldBuffer) {
-                build_setter!(FieldBuffer match buffer {} self @ $($disp_name, $field_name, $field_type;)*)
-            }
-        }
-
-        impl From<$name> for [u8; 56] {
-            fn from(value: $name) -> Self {
-                value.into_data()
-            }
-        }
-
-        impl From<[u8; 56]> for $name {
-            fn from(value: [u8; 56]) -> Self {
-                Self::from_data(value).unwrap_or(Self::DEFAULT)
-            }
-        }
-
-        #[derive(Clone, Copy)]
-        enum FieldBuffer {
-            $($disp_name($field_type),)*
-        }
-
-        impl FieldBuffer {
-            const fn name(&self) -> &'static [u8; 18] {
-                match self {
-                    $(
-                        Self::$disp_name(_) => &$name::NAMES[${index()}]
-                    ),*
-                }
-            }
-
-            const fn adjust(&mut self, click: Click) {
-                *self = match click {
-                    Click::CW => match *self {
-                        $(
-                            Self::$disp_name(x) => Self::$disp_name(incrementor!(x, $field_type))
-                        ),*
-                    },
-                    Click::CCW => match *self {
-                        $(
-                            Self::$disp_name(x) => Self::$disp_name(decrementor!(x, $field_type))
-                        ),*
-                    },
-                }
-            }
-
-            const fn draw(&self, page: PageBuilder) -> PageBuilder {
-                match self {
-                    $(
-                        Self::$disp_name(x) => draw_method!(*x, page, $field_type)
-                    ),*
-                }
-            }
-
-            const fn tooltip(&self) -> &'static [u8; 20] {
-                match self {
-                    $(
-                        Self::$disp_name(_) => tooltip!($field_type)
-                    ),*
-                }
-            }
-
-            const fn generate_edit_page(&self) -> PageData {
-                let page = PageBuilder::new()
-                    .byte(b'[')
-                    .write(self.name())
-                    .byte(b']')
-                    .end_line()
-                    .skip(2);
-                self
-                    .draw(page)
-                    .end_line()
-                    .write(self.tooltip())
-                    .write(b"  Press To Confirm  ")
-                    .finish()
-            }
-        }
-    };
-}
-
-portable!(
+crate::codegen::portable!(
     /// Portable configuration for the [`ClimateController`]
     ///
     /// The diapause season runs from `diapause_start_month`/`diapause_start_day` to
@@ -635,6 +66,9 @@ portable!(
 
         min_effective_subcooling as MinSubcooling: f32 = 8.0,
     }
+    exit = b"";
+    info = b"  Press To Confirm  ";
+    ConfigBuffer
 );
 
 impl ControllerConfig {
@@ -747,28 +181,6 @@ impl ControllerConfig {
             }
         }
     }
-
-    const fn generate_select_page(select_idx: &SelectIndex) -> PageData {
-        let mut page = PageBuilder::new();
-        let mut row = 0;
-        while row < 4 {
-            let display_idx = select_idx.window + row;
-            page = page
-                .write(if display_idx == select_idx.idx {
-                    b"> "
-                } else {
-                    b"  "
-                })
-                .write(if display_idx == 0 {
-                    b"[Finish Config]   "
-                } else {
-                    &Self::NAMES[(display_idx - 1) as usize]
-                })
-                .end_line();
-            row += 1;
-        }
-        page.finish()
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -787,82 +199,7 @@ impl Target {
     }
 }
 
-macro_rules! build_revolver {
-    ($type:ident match $value:ident {
-        $($in_names:pat => $out_names:expr),*
-     } @forward $name_a:ident @ $name_b:ident) => {
-        match $value {
-            $($in_names => $out_names,)*
-            $type::$name_a => $type::$name_b
-        }
-    };
-    ($type:ident match $value:ident {
-        $($in_names:pat => $out_names:expr),*
-     } @reverse $name_a:ident @ $name_b:ident) => {
-        match $value {
-            $($in_names => $out_names,)*
-            $type::$name_b => $type::$name_a
-        }
-    };
-    ($type:ident match $value:ident {
-        $($in_names:pat => $out_names:expr),*
-     } @forward $name_a:ident $name_b:ident $($tail:tt)*) => {
-        build_revolver!($type match $value {
-            $($in_names => $out_names,)*
-            $type::$name_a => $type::$name_b
-        } @forward $name_b $($tail)*)
-    };
-    ($type:ident match $value:ident {
-        $($in_names:pat => $out_names:expr),*
-     } @reverse $name_a:ident $name_b:ident $($tail:tt)*) => {
-        build_revolver!($type match $value {
-            $($in_names => $out_names,)*
-            $type::$name_b => $type::$name_a
-        } @reverse $name_b $($tail)*)
-    };
-    ($type:ident match $value:ident {
-        $($in_names:pat => $out_names:expr),*
-     } @forward @ $name_a:ident $name_b:ident $($tail:tt)*) => {
-        build_revolver!($type match $value {
-            $($in_names => $out_names,)*
-            $type::$name_a => $type::$name_b
-        } @forward $name_b $($tail)* @ $name_a)
-    };
-    ($type:ident match $value:ident {
-        $($in_names:pat => $out_names:expr),*
-     } @reverse @ $name_a:ident $name_b:ident $($tail:tt)*) => {
-        build_revolver!($type match $value {
-            $($in_names => $out_names,)*
-            $type::$name_b => $type::$name_a
-        } @reverse $name_b $($tail)* @ $name_a)
-    };
-}
-
-macro_rules! revolving_enum {
-    (
-        $(#[$meta:meta])*
-        $vis:vis enum $name:ident {
-            $($var_vis:vis $var_name:ident),* $(,)?
-        }
-    ) => {
-        $(#[$meta])*
-        $vis enum $name {
-            $($var_vis $var_name,)*
-        }
-
-        impl $name {
-            const fn next(self) -> Self {
-                build_revolver!($name match self {} @forward @ $($var_name)*)
-            }
-
-            const fn prev(self) -> Self {
-                build_revolver!($name match self {} @reverse @ $($var_name)*)
-            }
-        }
-    };
-}
-
-revolving_enum!(
+crate::codegen::revolving_enum!(
     #[derive(Clone, Copy)]
     enum PageId {
         TimeAndTarget,
@@ -912,123 +249,27 @@ impl SelectIndex {
             }
         }
     }
+
+    const fn generate_select_page(&self, names: &[[u8; 18]]) -> PageData {
+        let mut page = PageBuilder::new();
+        let mut row = 0;
+        while row < 4 {
+            let display_idx = self.window + row;
+            page = page
+                .write(if display_idx == self.idx {
+                    b"> "
+                } else {
+                    b"  "
+                })
+                .write(&names[display_idx as usize])
+                .end_line();
+            row += 1;
+        }
+        page.finish()
+    }
 }
 
-macro_rules! control {
-   (
-        $(#[$meta:meta])*
-        $vis:vis struct $name:ident {
-            $(
-                $(#[$field_meta:meta])*
-                $field_vis:vis $field_name:ident as $disp_name:ident : $field_type:tt = $default:expr
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$meta])*
-        $vis struct $name {
-            $(
-                $(#[$field_meta])*
-                $field_vis $field_name : $field_type,
-            )*
-        }
-
-        impl $name {
-            const DEFAULT: Self = Self {
-                $($field_name : $default,)*
-            };
-
-            const FIELD_COUNT: u8 = [$(stringify!($field_name)),*].len() as u8;
-
-            const NAMES: [[u8; 18]; Self::FIELD_COUNT as usize] = [$({
-                    let name = stringify!($disp_name).as_bytes();
-                    let mut buf = [b' '; 18];
-                    let mut i = 0;
-                    while i < name.len() {
-                        buf[i] = name[i];
-                        i += 1;
-                    }
-                    buf
-                }),*];
-
-            const fn get_buffer(&self, index: u8) -> Option<ControlBuffer> {
-                if index == 0 { return None; }
-                match index - 1 {
-                    $(
-                        ${index()} => Some(ControlBuffer::$disp_name(self.$field_name)),
-                    )*
-                    _ => None
-                }
-            }
-
-            const fn set_buffer(&mut self, buffer: ControlBuffer) {
-                build_setter!(ControlBuffer match buffer {} self @ $($disp_name, $field_name, $field_type;)*)
-            }
-        }
-
-        #[derive(Clone, Copy)]
-        enum ControlBuffer {
-            $($disp_name($field_type),)*
-        }
-
-        impl ControlBuffer {
-            const fn name(&self) -> &'static [u8; 18] {
-                match self {
-                    $(
-                        Self::$disp_name(_) => &$name::NAMES[${index()}]
-                    ),*
-                }
-            }
-
-            const fn adjust(&mut self, click: Click) {
-                *self = match click {
-                    Click::CW => match *self {
-                        $(
-                            Self::$disp_name(x) => Self::$disp_name(incrementor!(x, $field_type))
-                        ),*
-                    },
-                    Click::CCW => match *self {
-                        $(
-                            Self::$disp_name(x) => Self::$disp_name(decrementor!(x, $field_type))
-                        ),*
-                    },
-                }
-            }
-
-            const fn draw(&self, page: PageBuilder) -> PageBuilder {
-                match self {
-                    $(
-                        Self::$disp_name(x) => draw_method!(*x, page, $field_type)
-                    ),*
-                }
-            }
-
-            const fn tooltip(&self) -> &'static [u8; 20] {
-                match self {
-                    $(
-                        Self::$disp_name(_) => tooltip!($field_type)
-                    ),*
-                }
-            }
-
-            const fn generate_edit_page(&self) -> PageData {
-                let page = PageBuilder::new()
-                    .byte(b'[')
-                    .write(self.name())
-                    .byte(b']')
-                    .end_line()
-                    .skip(2);
-                self
-                    .draw(page)
-                    .end_line()
-                    .write(self.tooltip())
-                    .write(b"    Live Control    ")
-                    .finish()
-            }
-        }
-    };
-}
-
-control!(
+crate::codegen::interactive!(
     /// Manual control for the [`ClimateController`]
     #[derive(Clone)]
     pub struct ControlState {
@@ -1039,31 +280,10 @@ control!(
         duty_b as HabitatFan: Duty = Duty(0),
         duty_c as CoolantPump: Duty = Duty(0),
     }
+    exit = b"[Return To Auto]  ";
+    info = b"    Live Control    ";
+    ControlBuffer
 );
-
-impl ControlState {
-    const fn generate_select_page(select_idx: &SelectIndex) -> PageData {
-        let mut page = PageBuilder::new();
-        let mut row = 0;
-        while row < 4 {
-            let display_idx = select_idx.window + row;
-            page = page
-                .write(if display_idx == select_idx.idx {
-                    b"> "
-                } else {
-                    b"  "
-                })
-                .write(if display_idx == 0 {
-                    b"[Return To Auto]  "
-                } else {
-                    &Self::NAMES[(display_idx - 1) as usize]
-                })
-                .end_line();
-            row += 1;
-        }
-        page.finish()
-    }
-}
 
 #[derive(Clone, Copy)]
 struct Duty(u16);
@@ -1081,14 +301,14 @@ impl Duty {
 enum UIMode<'a> {
     Normal(&'a mut PageId),
     Select(&'a mut PageId, &'a mut SelectIndex),
-    Edit(&'a mut FieldBuffer),
+    Edit(&'a mut ConfigBuffer),
     Control(&'a mut ControlBuffer),
 }
 
 struct UIState {
     page: PageId,
     select_idx: Option<SelectIndex>,
-    edit_buffer: Option<FieldBuffer>,
+    edit_buffer: Option<ConfigBuffer>,
     control_buffer: Option<ControlBuffer>,
 }
 
@@ -1149,11 +369,11 @@ impl UIState {
         if self.control_buffer.take().is_some() {
             (false, false)
         } else if let Some(buffer) = self.edit_buffer.take() {
-            config.set_field(buffer);
+            config.set_buffer(buffer);
             (true, false)
         } else if let Some(ref mut select_idx) = self.select_idx {
             if matches!(self.page, PageId::Configuration) {
-                self.edit_buffer = config.get_field(select_idx.idx);
+                self.edit_buffer = config.get_buffer(select_idx.idx);
                 if self.edit_buffer.is_none() {
                     self.select_idx = None;
                 }
@@ -1612,11 +832,11 @@ impl ClimateController {
                     .write(b"  ...")
                     .finish(),
             },
-            UIMode::Select(page, select_idx) => match *page {
-                PageId::Configuration => ControllerConfig::generate_select_page(select_idx),
-                PageId::ManualControl => ControlState::generate_select_page(select_idx),
-                _ => PageBuilder::new().finish(),
-            },
+            UIMode::Select(page, select_idx) => select_idx.generate_select_page(match *page {
+                PageId::Configuration => &ControllerConfig::NAMES,
+                PageId::ManualControl => &ControlState::NAMES,
+                _ => unreachable!(),
+            }),
             UIMode::Edit(buffer) => buffer.generate_edit_page(),
             UIMode::Control(buffer) => buffer.generate_edit_page(),
         };

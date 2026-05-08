@@ -4,3 +4,4 @@ Cargo.lock
 /.report-cache
 /.claude
 /scripts
+.markdownlint.json

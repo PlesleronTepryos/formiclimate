@@ -104,3 +104,15 @@ pub const fn hexit(hexit: u8) -> u8 {
         _ => unreachable!(),
     }
 }
+
+/// Pads a byte string with spaces to a known constant size
+#[must_use]
+pub const fn pad_bytes<const N: usize>(bytes: &[u8]) -> [u8; N] {
+    let mut buf = [b' '; N];
+    let mut i = 0;
+    while i < bytes.len() && i < N {
+        buf[i] = bytes[i];
+        i += 1;
+    }
+    buf
+}
