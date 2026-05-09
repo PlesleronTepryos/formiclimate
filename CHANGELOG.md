@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 - 2026.05.09
+
+### Fixed
+
+- Missing exit string for `ControllerConfig`
+
 ## 0.2.1 - 2026.05.08
 
 ### Added

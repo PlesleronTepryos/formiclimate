@@ -66,7 +66,7 @@ crate::codegen::portable!(
 
         min_effective_subcooling as MinSubcooling: f32 = 8.0,
     }
-    exit = b"";
+    exit = b"[Exit Config]";
     info = b"  Press To Confirm  ";
     ConfigBuffer
 );
