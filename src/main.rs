@@ -29,7 +29,7 @@ pub mod utils;
 
 use crate::{
     control::{PWMController, Relay},
-    display::{Display, PageBuilder, PageData},
+    display::{Display, PageData},
     encoder::{Click, Encoder},
     millis::{init_millis, millis},
     rtc::{Date, Month, RTCTime, DS1307},
@@ -158,26 +158,26 @@ impl ControllerConfig {
         a_temp * (1.0 - prog) + b_temp * prog
     }
 
-    const fn diapause_status(&self, time: RTCTime) -> &'static str {
+    const fn diapause_status(&self, time: RTCTime) -> &'static [u8; 11] {
         let (diapause_duration, days_since_start, ramp) = self.calc_diapause_window(time);
 
         if days_since_start < ramp {
-            "[Ramp Down]"
+            b"[Ramp Down]"
         } else if days_since_start < diapause_duration.saturating_sub(ramp) {
-            "[Diapause]"
+            b" [Diapause]"
         } else if days_since_start < diapause_duration {
-            "[Ramp Up]"
+            b"  [Ramp Up]"
         } else {
             let hour = time.hours.bin();
 
             if hour < 6 {
-                "[Night]"
+                b"[Nighttime]"
             } else if hour < 12 {
-                "[Morning]"
+                b"  [Morning]"
             } else if hour < 18 {
-                "[Day]"
+                b"  [Daytime]"
             } else {
-                "[Evening]"
+                b"  [Evening]"
             }
         }
     }
@@ -250,22 +250,23 @@ impl SelectIndex {
         }
     }
 
-    const fn generate_select_page(&self, names: &[[u8; 18]]) -> PageData {
-        let mut page = PageBuilder::new();
-        let mut row = 0;
-        while row < 4 {
-            let display_idx = self.window + row;
-            page = page
-                .write(if display_idx == self.idx {
-                    b"> "
-                } else {
-                    b"  "
-                })
-                .write(&names[display_idx as usize])
-                .end_line();
-            row += 1;
-        }
-        page.finish()
+    const fn generate_select_page(&self, names: &[[u8; 18]], page: &mut PageData) {
+        let offset = self.idx - self.window;
+        crate::page!(
+            rewrite page;
+            byte b'>' if offset == 0;
+            skip 1;
+            write 18 &names[self.window as usize];
+            byte b'>' if offset == 1;
+            skip 1;
+            write 18 &names[(self.window + 1) as usize];
+            byte b'>' if offset == 2;
+            skip 1;
+            write 18 &names[(self.window + 2) as usize];
+            byte b'>' if offset == 3;
+            skip 1;
+            write 18 &names[(self.window + 3) as usize];
+        );
     }
 }
 
@@ -280,7 +281,7 @@ crate::codegen::interactive!(
         duty_b as HabitatFan: Duty = Duty(0),
         duty_c as CoolantPump: Duty = Duty(0),
     }
-    exit = b"[Return To Auto]  ";
+    exit = b"[Return To Auto]";
     info = b"    Live Control    ";
     ControlBuffer
 );
@@ -575,8 +576,6 @@ impl ClimateController {
                 pins.pd0.into_pull_up_input(),
                 50_000,
             )),
-            // Note: pc7 is connected via a 1k resistor to pd7, which, when pd7 is set high, acts as
-            // a pull-up for the ds1307's open-drain oscillator output
             _sqw: pins.pc7,
 
             encoder: Encoder::new(pins.pe2, pins.pe6, pins.pb4, periphs.EXINT, periphs.TC4),
@@ -773,75 +772,83 @@ impl ClimateController {
 
     #[inline(never)]
     fn display(&mut self) {
-        let page = match self.ui_state.mode() {
-            UIMode::Normal(page) => match page {
-                PageId::TimeAndTarget => {
-                    let page = if let Ok(time) = self.rtc.get_time() {
-                        PageBuilder::new()
-                            .write(time.day.abbrev().as_bytes())
-                            .skip(1)
-                            .write(b"20")
-                            .hexit2(time.year.bcd())
-                            .byte(b'.')
-                            .hexit2(time.month.bcd())
-                            .byte(b'.')
-                            .hexit2(time.date.bcd())
-                            .end_line()
-                            .hexit2(time.hours.bcd_24h())
-                            .byte(b':')
-                            .hexit2(time.minutes.bcd())
-                            .byte(b':')
-                            .hexit2(time.seconds.bcd())
-                            .skip(1)
-                            .write(self.config.diapause_status(time).as_bytes())
-                            .end_line()
-                    } else {
-                        PageBuilder::new()
-                            .write(b"RTC not responding")
-                            .end_line()
-                            .next_line()
-                    };
-
-                    if let Some(target) = self.target_temp.value() {
-                        page.write(b"Setpoint:   ").decimal(target).byte(b'F')
-                    } else {
-                        page.write(b"Calibrating...").end_line()
+        match self.ui_state.mode() {
+            UIMode::Normal(page) => crate::page!(
+                rewrite self.display.back_mut();
+                match PAGE (*page) {
+                    PageId::TimeAndTarget => {
+                        if RTC (let Ok(time) = self.rtc.get_time()) {
+                            write 3 time.day.abbrev();
+                            skip 1;
+                            write b"20";
+                            hexit2 time.year.bcd();
+                            byte b'.';
+                            hexit2 time.month.bcd();
+                            byte b'.';
+                            hexit2 time.date.bcd();
+                            end_line;
+                            hexit2 time.hours.bcd_24h();
+                            byte b':';
+                            hexit2 time.minutes.bcd();
+                            byte b':';
+                            hexit2 time.seconds.bcd();
+                            skip 1;
+                            write 11 self.config.diapause_status(time);
+                            end_line;
+                        } else {
+                            write b"RTC not responding";
+                            end_line;
+                            next_line;
+                        }
+                        if TARGET (let Some(target) = self.target_temp.value()) {
+                            write b"Setpoint:   ";
+                            decimal target;
+                            byte b'F';
+                        } else {
+                            write b"Calibrating...";
+                            end_line;
+                        }
+                        write b"Habitat:    ";
+                        decimal self.sensorium.habitat_temp().fahrenheit();
+                        byte b'F';
                     }
-                    .write(b"Habitat:    ")
-                    .decimal(self.sensorium.habitat_temp().fahrenheit())
-                    .byte(b'F')
-                    .finish()
+                    PageId::TempReadings => {
+                        write b"Habitat:    ";
+                        decimal self.sensorium.habitat_temp().fahrenheit();
+                        byte b'F';
+                        write b"Coolant:    ";
+                        decimal self.sensorium.coolant_temp().fahrenheit();
+                        byte b'F';
+                        write b"Condenser:  ";
+                        decimal self.sensorium.condenser_temp().fahrenheit();
+                        byte b'F';
+                        end_page;
+                    }
+                    PageId::Configuration => {
+                        write b"> [Press To Config] ";
+                        write b"  ...";
+                        end_page;
+                    }
+                    PageId::ManualControl => {
+                        write b"> [Press To Control]";
+                        write b"  ...";
+                        end_page;
+                    }
                 }
-                PageId::TempReadings => PageBuilder::new()
-                    .write(b"Habitat:    ")
-                    .decimal(self.sensorium.habitat_temp().fahrenheit())
-                    .byte(b'F')
-                    .write(b"Coolant:    ")
-                    .decimal(self.sensorium.coolant_temp().fahrenheit())
-                    .byte(b'F')
-                    .write(b"Condenser:  ")
-                    .decimal(self.sensorium.condenser_temp().fahrenheit())
-                    .byte(b'F')
-                    .finish(),
-                PageId::Configuration => PageBuilder::new()
-                    .write(b"> [Press To Config] ")
-                    .write(b"  ...")
-                    .finish(),
-                PageId::ManualControl => PageBuilder::new()
-                    .write(b"> [Press To Control]")
-                    .write(b"  ...")
-                    .finish(),
-            },
-            UIMode::Select(page, select_idx) => select_idx.generate_select_page(match *page {
-                PageId::Configuration => &ControllerConfig::NAMES,
-                PageId::ManualControl => &ControlState::NAMES,
-                _ => unreachable!(),
-            }),
-            UIMode::Edit(buffer) => buffer.generate_edit_page(),
-            UIMode::Control(buffer) => buffer.generate_edit_page(),
-        };
+            ),
+            UIMode::Select(page, select_idx) => select_idx.generate_select_page(
+                match *page {
+                    PageId::Configuration => &ControllerConfig::NAMES,
+                    PageId::ManualControl => &ControlState::NAMES,
+                    _ => unreachable!(),
+                },
+                self.display.back_mut(),
+            ),
+            UIMode::Edit(buffer) => buffer.generate_edit_page(self.display.back_mut()),
+            UIMode::Control(buffer) => buffer.generate_edit_page(self.display.back_mut()),
+        }
 
-        self.display.write_page(page);
+        self.display.swap();
     }
 
     fn periodic(&mut self) {

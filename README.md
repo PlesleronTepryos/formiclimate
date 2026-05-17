@@ -18,5 +18,11 @@ lot of evolution and documentation to go before that happens
 4. `ravedude` will open a console session after flashing where you can interact
    with the UART console of your board.
 
+## LLM Use Disclosure
+
+This project makes use of Claude Code for review, bugfixing, and drafting new features. All
+contributions made by Claude are held to a high standard and undergo significant collaborative
+revision before inclusion in the project. **This project contains no vibecoding**
+
 [`avr-hal` README]: https://github.com/Rahix/avr-hal#readme
 [`ravedude`]: https://crates.io/crates/ravedude

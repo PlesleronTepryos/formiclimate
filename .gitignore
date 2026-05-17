@@ -3,5 +3,7 @@ Cargo.lock
 *.code-workspace
 /.report-cache
 /.claude
+CLAUDE.md
 /scripts
 .markdownlint.json
+PLANS.md

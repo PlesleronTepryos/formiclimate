@@ -835,29 +835,29 @@ impl Day {
 
     /// Name of [Day] as text
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static [u8; 9] {
         match self {
-            Self::Sunday => "Sunday",
-            Self::Monday => "Monday",
-            Self::Tuesday => "Tuesday",
-            Self::Wednesday => "Wednesday",
-            Self::Thursday => "Thursday",
-            Self::Friday => "Friday",
-            Self::Saturday => "Saturday",
+            Self::Sunday => b"Sunday   ",
+            Self::Monday => b"Monday   ",
+            Self::Tuesday => b"Tuesday  ",
+            Self::Wednesday => b"Wednesday",
+            Self::Thursday => b"Thursday ",
+            Self::Friday => b"Friday   ",
+            Self::Saturday => b"Saturday ",
         }
     }
 
     /// 3-letter abbreviation of [Day]
     #[must_use]
-    pub const fn abbrev(self) -> &'static str {
+    pub const fn abbrev(self) -> &'static [u8; 3] {
         match self {
-            Self::Sunday => "Sun",
-            Self::Monday => "Mon",
-            Self::Tuesday => "Tue",
-            Self::Wednesday => "Wed",
-            Self::Thursday => "Thu",
-            Self::Friday => "Fri",
-            Self::Saturday => "Sat",
+            Self::Sunday => b"Sun",
+            Self::Monday => b"Mon",
+            Self::Tuesday => b"Tue",
+            Self::Wednesday => b"Wed",
+            Self::Thursday => b"Thu",
+            Self::Friday => b"Fri",
+            Self::Saturday => b"Sat",
         }
     }
 
@@ -963,7 +963,7 @@ impl Date {
 
     /// Ordinal suffix for the date ("st", "nd", "rd", or "th")
     #[must_use]
-    pub const fn suffix(self) -> &'static [u8] {
+    pub const fn suffix(self) -> &'static [u8; 2] {
         if (self.0 & 0x30) == 0x10 {
             b"th"
         } else {
@@ -1101,39 +1101,39 @@ impl Month {
 
     /// Name of [Month] as text
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static [u8; 9] {
         match self {
-            Self::January => "January",
-            Self::February => "February",
-            Self::March => "March",
-            Self::April => "April",
-            Self::May => "May",
-            Self::June => "June",
-            Self::July => "July",
-            Self::August => "August",
-            Self::September => "September",
-            Self::October => "October",
-            Self::November => "November",
-            Self::December => "December",
+            Self::January => b"January  ",
+            Self::February => b"February ",
+            Self::March => b"March    ",
+            Self::April => b"April    ",
+            Self::May => b"May      ",
+            Self::June => b"June     ",
+            Self::July => b"July     ",
+            Self::August => b"August   ",
+            Self::September => b"September",
+            Self::October => b"October  ",
+            Self::November => b"November ",
+            Self::December => b"December ",
         }
     }
 
     /// 3-letter abbreviation of [Month]
     #[must_use]
-    pub const fn abbrev(self) -> &'static str {
+    pub const fn abbrev(self) -> &'static [u8; 3] {
         match self {
-            Self::January => "Jan",
-            Self::February => "Feb",
-            Self::March => "Mar",
-            Self::April => "Apr",
-            Self::May => "May",
-            Self::June => "Jun",
-            Self::July => "Jul",
-            Self::August => "Aug",
-            Self::September => "Sep",
-            Self::October => "Oct",
-            Self::November => "Nov",
-            Self::December => "Dec",
+            Self::January => b"Jan",
+            Self::February => b"Feb",
+            Self::March => b"Mar",
+            Self::April => b"Apr",
+            Self::May => b"May",
+            Self::June => b"Jun",
+            Self::July => b"Jul",
+            Self::August => b"Aug",
+            Self::September => b"Sep",
+            Self::October => b"Oct",
+            Self::November => b"Nov",
+            Self::December => b"Dec",
         }
     }
 

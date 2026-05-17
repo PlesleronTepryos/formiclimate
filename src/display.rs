@@ -8,259 +8,82 @@ use arduino_hal::{
     },
 };
 
-use crate::utils::{hexit, u16_to_f32};
-
-/// Tool for building a page's layout before sending it to the display
-#[must_use]
-#[repr(C)]
-pub struct PageBuilder {
-    data: [u8; 80],
-    pos: u8,
-}
-
-impl PageBuilder {
-    /// Create a new blank page to write on
-    #[inline(never)]
-    pub const fn new() -> Self {
-        Self {
-            data: [b' '; 80],
-            pos: 0,
-        }
-    }
-
-    /// Write an arbitrary byte to the page, moving the cursor by 1
-    ///
-    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
-    /// reaches the end of the last line, subsequent bytes are dropped
-    #[inline(never)]
-    pub const fn byte(mut self, byte: u8) -> Self {
-        if self.pos < 80 {
-            self.data[self.pos as usize] = byte;
-            self.pos += 1;
-        }
-        self
-    }
-
-    /// Write a hexadecimal digit in ascii to the page, moving the cursor by 1
-    ///
-    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
-    /// reaches the end of the last line, subsequent bytes are dropped
-    pub const fn hexit(self, value: u8) -> Self {
-        self.byte(hexit(value))
-    }
-
-    /// Write a pair of hexadecimal digits in ascii to the page, moving the cursor by 2
-    ///
-    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
-    /// reaches the end of the last line, subsequent bytes are dropped
-    #[inline(never)]
-    pub const fn hexit2(self, value: u8) -> Self {
-        self.write(&[hexit(value >> 4), hexit(value & 0xf)])
-    }
-
-    /// Prints a floating point value in the range `[-999.99, 999.99]` at the current position,
-    /// padded so that the cursor always moves by 7 characters
-    ///
-    /// Leading zeroes are omitted and the sign always appears immediately before the first nonzero
-    /// leading digit, or the decimal point if there is none
-    pub const fn decimal(self, value: f32) -> Self {
-        let [b0, b1, b2, b3] = value.to_le_bytes();
-        let sign = if b3 >> 7 == 1 { b'-' } else { b' ' };
-        let abs_b3 = b3 & 0x7F;
-
-        let mut out_bytes;
-        self.write(if abs_b3 == 0x7F && b2 >> 7 == 1 {
-            if b2 & 0x7f != 0 || b1 != 0 || b0 != 0 {
-                b"    NaN"
-            } else if sign == b'-' {
-                b"   -Inf"
-            } else {
-                b"    Inf"
-            }
-        } else {
-            let abs = f32::from_le_bytes([b0, b1, b2, abs_b3]);
-
-            let trunc = abs as u16;
-            let frac = ((abs - u16_to_f32(trunc)) * 100.0) as u8;
-
-            let ones = (trunc % 10) as u8;
-            let tens = (trunc / 10) as u8;
-
-            out_bytes = [
-                sign,
-                b'0' + tens / 10,
-                b'0' + tens % 10,
-                b'0' + ones,
-                b'.',
-                b'0' + frac / 10,
-                b'0' + frac % 10,
-            ];
-
-            let mut i = 1;
-            while i < 4 && out_bytes[i] == b'0' {
-                out_bytes[i - 1] = b' ';
-                out_bytes[i] = sign;
-                i += 1;
-            }
-
-            &out_bytes
-        })
-    }
-
-    /// Prints an unsigned integer right-aligned in exactly 6 characters
-    pub const fn uint(self, value: u16) -> Self {
-        let mut out_bytes;
-        self.write(if value == 0 {
-            b"     0"
-        } else {
-            let ones_and_tens = (value % 100) as u8;
-            let rest = value / 100;
-            let hund_and_thou = (rest % 100) as u8;
-
-            out_bytes = [
-                b' ',
-                b'0' + (rest / 100) as u8,
-                b'0' + hund_and_thou / 10,
-                b'0' + hund_and_thou % 10,
-                b'0' + ones_and_tens / 10,
-                b'0' + ones_and_tens % 10,
-            ];
-
-            let mut i = 1;
-            while i < 5 && out_bytes[i] == b'0' {
-                out_bytes[i] = b' ';
-                i += 1;
-            }
-
-            &out_bytes
-        })
-    }
-
-    /// Prints a signed integer right-aligned in exactly 6 characters
-    pub const fn sint(self, value: i16) -> Self {
-        let sign = if value < 0 { b'-' } else { b' ' };
-        let abs_value = value.unsigned_abs();
-
-        let mut out_bytes;
-        self.write(if abs_value == 0 {
-            b"     0"
-        } else {
-            let ones_and_tens = (abs_value % 100) as u8;
-            let rest = abs_value / 100;
-            let hund_and_thou = (rest % 100) as u8;
-
-            out_bytes = [
-                sign,
-                b'0' + (rest / 100) as u8,
-                b'0' + hund_and_thou / 10,
-                b'0' + hund_and_thou % 10,
-                b'0' + ones_and_tens / 10,
-                b'0' + ones_and_tens % 10,
-            ];
-
-            let mut i = 1;
-            while i < 5 && out_bytes[i] == b'0' {
-                out_bytes[i - 1] = b' ';
-                out_bytes[i] = sign;
-                i += 1;
-            }
-
-            &out_bytes
-        })
-    }
-
-    /// Write a series of bytes to the page, moving the cursor by `bytes.len()`
-    ///
-    /// Note: If the cursor reaches the end of a line, it automatically jumps to the next. If it
-    /// reaches the end of the last line, remaining bytes are dropped
-    #[inline(never)]
-    pub const fn write(mut self, bytes: &[u8]) -> Self {
-        let mut i = 0;
-        while self.pos < 80 && i < bytes.len() {
-            self.data[self.pos as usize] = bytes[i];
-            self.pos += 1;
-            i += 1;
-        }
-        self
-    }
-
-    /// Skips ahead by `n` characters
-    #[inline(never)]
-    pub const fn skip(mut self, n: u8) -> Self {
-        self.pos += n;
-        if self.pos > 80 {
-            self.pos = 80;
-        }
-        self
-    }
-
-    /// Fills the remainder of the current line with blank space and moves to the next line; this is
-    /// a no-op at the very beginning of a line
-    #[inline(never)]
-    pub const fn end_line(mut self) -> Self {
-        self.pos = if self.pos <= 20 {
-            20
-        } else if self.pos <= 40 {
-            40
-        } else if self.pos <= 60 {
-            60
-        } else {
-            80
-        };
-        self
-    }
-
-    /// Jumps cursor to the beginning of next line uncondtionally
-    #[inline(never)]
-    pub const fn next_line(mut self) -> Self {
-        self.pos = if self.pos < 20 {
-            20
-        } else if self.pos < 40 {
-            40
-        } else if self.pos < 60 {
-            60
-        } else {
-            80
-        };
-        self
-    }
-
-    /// Finalize the page
-    pub const fn finish(self) -> PageData {
-        PageData {
-            data: self.data,
-            _filler: 0,
-        }
-    }
-}
-
-impl Default for PageBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// A complete page ready to be sent to the display
+#[derive(Clone)]
 #[must_use]
 #[repr(C)]
 pub struct PageData {
     data: [u8; 80],
-    _filler: u8,
 }
 
 impl PageData {
-    /// A completely blank page
-    pub const BLANK: Self = Self {
-        data: [b' '; 80],
-        _filler: 0,
-    };
+    const BLANK: Self = Self { data: [b' '; 80] };
 
-    /// Rewrite the existing page data
-    pub const fn rewrite(self) -> PageBuilder {
-        PageBuilder {
-            data: self.data,
-            pos: 0,
+    /// Create a new blank page (all spaces)
+    pub const fn blank() -> Self {
+        Self::BLANK
+    }
+
+    /// Create a new page from the given character data
+    pub const fn new(data: [u8; 80]) -> Self {
+        Self { data }
+    }
+
+    /// Reset the page to blank (all spaces)
+    pub const fn clear(&mut self) {
+        *self = Self::BLANK;
+    }
+
+    /// Position after padding the current line to its end (no-op if already at a line boundary)
+    #[must_use]
+    pub const fn end_line_pos(pos: usize) -> usize {
+        if pos <= 20 {
+            20
+        } else if pos <= 40 {
+            40
+        } else if pos <= 60 {
+            60
+        } else if pos <= 80 {
+            80
+        } else {
+            panic!("invalid positon")
         }
+    }
+
+    /// Position at the start of the next line
+    #[must_use]
+    pub const fn next_line_pos(pos: usize) -> usize {
+        if pos < 20 {
+            20
+        } else if pos < 40 {
+            40
+        } else if pos < 60 {
+            60
+        } else if pos < 80 {
+            80
+        } else {
+            panic!("invalid positon")
+        }
+    }
+
+    /// Write a single byte at `pos`
+    pub const fn write_byte(&mut self, pos: usize, byte: u8) {
+        self.data[pos] = byte;
+    }
+
+    /// Write the first `n` bytes of `bytes` starting at `pos`
+    pub const fn write_bytes(&mut self, pos: usize, bytes: &[u8], n: usize) {
+        let mut i = 0;
+        while i < n {
+            self.data[pos + i] = bytes[i];
+            i += 1;
+        }
+    }
+
+    /// Return the underlying character data
+    #[must_use]
+    pub const fn into_data(self) -> [u8; 80] {
+        self.data
     }
 }
 
@@ -276,7 +99,9 @@ pub struct Display {
     d6: Pin<Output, PB2>,
     d7: Pin<Output, PB3>,
 
-    page: PageData,
+    page_a: PageData,
+    page_b: PageData,
+    which: bool,
 }
 
 impl Display {
@@ -298,7 +123,9 @@ impl Display {
             d6: pb2.into_output(),
             d7: pb3.into_output(),
 
-            page: PageData::BLANK,
+            page_a: PageData::BLANK,
+            page_b: PageData::BLANK,
+            which: false,
         }
     }
 
@@ -392,7 +219,33 @@ impl Display {
         self.en.set_low();
     }
 
-    /// Write an entire page worth of data to the display
+    const fn front(&self) -> &PageData {
+        if self.which {
+            &self.page_a
+        } else {
+            &self.page_b
+        }
+    }
+
+    const fn back(&self) -> &PageData {
+        if self.which {
+            &self.page_b
+        } else {
+            &self.page_a
+        }
+    }
+
+    /// Returns a mutable reference to the page not currently on display
+    pub const fn back_mut(&mut self) -> &mut PageData {
+        if self.which {
+            &mut self.page_b
+        } else {
+            &mut self.page_a
+        }
+    }
+
+    /// Present the back buffer to the display, sending only characters that differ from the
+    /// currently displayed page
     ///
     /// # Performance
     /// Execution time is variable based on how much of the new page is different from the last and
@@ -404,16 +257,18 @@ impl Display {
     /// - if every other character is different (40 new characters with 40 unchanged runs between)
     ///
     /// Any other situation will take less time, down to ~400us with a completely identical page
-    pub fn write_page(&mut self, page: PageData) {
+    pub fn swap(&mut self) {
         let mut i = 0;
         let mut col = 0;
         let mut row = 0;
 
         let mut skip = true;
 
+        self.which = !self.which;
+
         while i < 80 {
-            let byte = page.data[i];
-            if byte == self.page.data[i] {
+            let byte = self.front().data[i];
+            if byte == self.back().data[i] {
                 skip = true;
             } else {
                 if skip {
@@ -432,7 +287,242 @@ impl Display {
                 skip = true;
             }
         }
-
-        self.page = page;
     }
+}
+
+/// Build a [`PageData`] with compile-time cursor tracking and bounds checking
+///
+/// # Invocation forms
+///
+/// - `page!(cmds...)`: creates and returns a new [`PageData`]
+/// - `page!(rewrite <page>; cmds...)`: clears and rewrites an existing [`PageData`]
+///
+/// # Commands (separated by `;`)
+///
+/// - `write b"..."`: write a fixed-length byte string literal
+/// - `write N <expr>`: write the first `N` characters of any `&[u8]` expression
+/// - `decimal <expr>`: render an `f32` in 7 characters (eg. `-999.99`)
+/// - `uint <expr>`: render a `u16` in 5 characters (eg. `65535`)
+/// - `sint <expr>`: render an `i16` in 6 characters (eg. `-32768`)
+/// - `byte <expr>`: write a single character
+/// - `byte b'' if <expr>`: write the given byte only if `expr` is `true`, otherwise leave blank
+/// - `hexit2 <expr>`: render a `u8` as two hexadecimal characters (also works for BCD values)
+/// - `skip N`: skip ahead by `N` characters (`N` must be an integer literal)
+/// - `end_line`: jump to the end of the current line (no-op if already at the end)
+/// - `next_line`: jump to the start of the next line (skips entire line if already at the start)
+/// - `end_page`: jump to the end of the whole page
+/// - `if NAME (<cond>) { cmds... } else { cmds... }`: conditional; `NAME` should be a unique
+///   `const` identifier within this invocation of `page!()`; `cond` may be an expression or a `let`
+///   pattern; both branches must advance the cursor by the same number of characters
+/// - `match NAME (<expr>) { <pat> => { cmds... } , ... }`: pattern match; `NAME` should be a unique
+///   `const` identifier within this invocation of `page!()`; all arms must advance the cursor by
+///   the same number of characters
+#[macro_export]
+macro_rules! page {
+    // Command parsing
+    (@s $d:ident [$pe:expr]) => {};
+    (@s $d:ident [$pe:expr] write $bytes:literal; $($r:tt)*) => {
+        const { assert!($pe + $bytes.len() <= 80usize, "page overflow") };
+        $d.write_bytes($pe, $bytes, $bytes.len());
+        $crate::page!(@s $d [$pe + $bytes.len()] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] write 2 $bytes:expr; $($r:tt)*) => {
+        const { assert!($pe + 2 <= 80usize, "page overflow") };
+        {
+            let [__v0, __v1] = *$bytes;
+            $d.write_byte($pe, __v0);
+            $d.write_byte($pe + 1, __v1);
+        }
+        $crate::page!(@s $d [$pe + 2] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] write 3 $bytes:expr; $($r:tt)*) => {
+        const { assert!($pe + 3 <= 80usize, "page overflow") };
+        {
+            let [__v0, __v1, __v2] = *$bytes;
+            $d.write_byte($pe, __v0);
+            $d.write_byte($pe + 1, __v1);
+            $d.write_byte($pe + 2, __v2);
+        }
+        $crate::page!(@s $d [$pe + 3] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] write $n:literal $bytes:expr; $($r:tt)*) => {
+        const { assert!($pe + $n <= 80usize, "page overflow") };
+        $d.write_bytes($pe, $bytes, $n);
+        $crate::page!(@s $d [$pe + $n] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] decimal $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe] write 7 &$crate::utils::f32_to_bytes($v); $($r)*);
+    };
+    (@s $d:ident [$pe:expr] uint $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe] write 5 &$crate::utils::u16_to_bytes($v); $($r)*);
+    };
+    (@s $d:ident [$pe:expr] sint $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe] write 6 &$crate::utils::i16_to_bytes($v); $($r)*);
+    };
+    (@s $d:ident [$pe:expr] byte b' '; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe] skip 1; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] byte $b:literal if $cond:expr; $($r:tt)*) => {
+        const { assert!($pe < 80usize, "page overflow") };
+        if $cond {
+            $d.write_byte($pe, $b);
+        }
+        $crate::page!(@s $d [$pe + 1] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] byte $b:expr; $($r:tt)*) => {
+        const { assert!($pe < 80usize, "page overflow") };
+        $d.write_byte($pe, $b);
+        $crate::page!(@s $d [$pe + 1] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] hexit2 $v:expr; $($r:tt)*) => {
+        const { assert!($pe + 2 <= 80usize, "page overflow") };
+        {
+            let __v = $v;
+            $d.write_byte($pe, $crate::utils::hexit(__v >> 4));
+            $d.write_byte($pe + 1, $crate::utils::hexit(__v & 0xf));
+        }
+        $crate::page!(@s $d [$pe + 2] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] skip 1; $($r:tt)*) => {
+        const { assert!($pe < 80usize, "page overflow") };
+        $crate::page!(@s $d [$pe + 1] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] skip $n:literal; $($r:tt)*) => {
+        const { assert!($pe + $n <= 80usize, "page overflow") };
+        $crate::page!(@s $d [$pe + $n] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] end_line; $($r:tt)*) => {
+        $crate::page!(@s $d [$crate::display::PageData::end_line_pos($pe)] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] next_line; $($r:tt)*) => {
+        const { assert!($pe < 80usize, "past last line") };
+        $crate::page!(@s $d [$crate::display::PageData::next_line_pos($pe)] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] end_page; $($r:tt)*) => {
+        $crate::page!(@s $d [80] $($r)*);
+    };
+    (@s $d:ident [$pe:expr] if $name:ident ($($cond:tt)*) { $($if_t:tt)* } else { $($if_f:tt)* } $($r:tt)*) => {{
+        const $name: usize = $crate::page!(@c [0usize] $($if_t)*);
+        const {
+            assert!($crate::page!(@c [0usize] $($if_f)*) == $name, "if/else branches must have equal length");
+            assert!(($pe) + $name <= 80usize, "if/else block exceeds end of page");
+        };
+        if $($cond)* {
+            $crate::page!(@s $d [$pe] $($if_t)*);
+        } else {
+            $crate::page!(@s $d [$pe] $($if_f)*);
+        }
+        $crate::page!(@s $d [($pe) + $name] $($r)*);
+    }};
+    (@s $d:ident [$pe:expr] match $name:ident ($e:expr) { $first_p:pat => { $($first_arm:tt)* } $(,)? $( $p:pat => { $($arm:tt)* } $(,)? )* } $($r:tt)*) => {{
+        const $name: usize = $crate::page!(@c [0usize] $($first_arm)*);
+        const {
+            $( assert!($crate::page!(@c [0usize] $($arm)*) == $name, "match arms must have equal length"); )*
+            assert!(($pe) + $name <= 80usize, "match block exceeds end of page");
+        };
+        match $e {
+            $first_p => { $crate::page!(@s $d [$pe] $($first_arm)*); },
+            $( $p => { $crate::page!(@s $d [$pe] $($arm)*); } ),*
+        }
+        $crate::page!(@s $d [($pe) + $name] $($r)*);
+    }};
+
+    // Fixed-width fields; these commands should only be used by the code generated by the
+    // `interactive!()` macro; intentionally undocumented
+    (@s $d:ident [$pe:expr] field bool $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 5] if __BOOL ($v) { skip 1; write b"On"; } else { write b"Off"; } $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field u8 $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 3] uint $v as u16; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field u16 $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 3] uint $v; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field u32 $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 3] uint $v as u16; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field i8 $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 2] sint $v as i16; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field i16 $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 2] sint $v; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field i32 $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 2] sint $v as i16; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field f32 $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe] decimal $v; byte b'F'; $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field Month $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 5] write 3 $v.abbrev(); $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field Date $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 4] hexit2 $v.bcd(); write 2 $v.suffix(); $($r)*);
+    };
+    (@s $d:ident [$pe:expr] field Duty $v:expr; $($r:tt)*) => {
+        $crate::page!(@s $d [$pe + 3] uint $v.0; $($r)*);
+    };
+
+    // Cursor advance calculation
+    (@c [$pe:expr]) => { $pe };
+    (@c [$pe:expr] write $bytes:literal; $($r:tt)*) => {
+        $crate::page!(@c [$pe + $bytes.len()] $($r)*)
+    };
+    (@c [$pe:expr] write $n:literal $_b:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + $n] $($r)*)
+    };
+    (@c [$pe:expr] decimal $_v:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 7] $($r)*)
+    };
+    (@c [$pe:expr] uint $_v:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 5] $($r)*)
+    };
+    (@c [$pe:expr] sint $_v:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 6] $($r)*)
+    };
+    (@c [$pe:expr] byte $_b:literal if $_cond:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 1] $($r)*)
+    };
+    (@c [$pe:expr] byte $_b:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 1] $($r)*)
+    };
+    (@c [$pe:expr] hexit2 $_v:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 2] $($r)*)
+    };
+    (@c [$pe:expr] skip 1; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 1] $($r)*)
+    };
+    (@c [$pe:expr] skip $n:literal; $($r:tt)*) => {
+        $crate::page!(@c [$pe + $n] $($r)*)
+    };
+    (@c [$pe:expr] end_line; $($r:tt)*) => {
+        $crate::page!(@c [$crate::display::PageData::end_line_pos($pe)] $($r)*)
+    };
+    (@c [$pe:expr] next_line; $($r:tt)*) => {
+        $crate::page!(@c [$crate::display::PageData::next_line_pos($pe)] $($r)*)
+    };
+    (@c [$pe:expr] end_page; $($r:tt)*) => {
+        $crate::page!(@c [80] $($r)*)
+    };
+    (@c [$pe:expr] if $_name:ident ($($cond:tt)*) { $($if_t:tt)* } else { $($if_f:tt)* } $($r:tt)*) => {
+        $crate::page!(@c [$pe + $crate::page!(@c [0usize] $($if_t)*)] $($r)*)
+    };
+    (@c [$pe:expr] match $_name:ident ($_e:expr) { $_first_p:pat => { $($first_arm:tt)* } $(,)? $( $_p:pat => { $($_arm:tt)* } $(,)? )* } $($r:tt)*) => {
+        $crate::page!(@c [$pe + $crate::page!(@c [0usize] $($first_arm)*)] $($r)*)
+    };
+    (@c [$pe:expr] field $_t:tt $_v:expr; $($r:tt)*) => {
+        $crate::page!(@c [$pe + 8] $($r)*)
+    };
+
+    (rewrite $page:expr; $($tok:tt)*) => {{
+        let __page = $page;
+        __page.clear();
+        $crate::page!(@s __page [0usize] $($tok)*);
+    }};
+
+    ($($tok:tt)*) => {{
+        let mut __page = $crate::display::PageData::blank();
+        $crate::page!(@s __page [0usize] $($tok)*);
+        __page
+    }};
 }

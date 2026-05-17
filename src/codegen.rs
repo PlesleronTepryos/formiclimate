@@ -297,42 +297,6 @@ macro_rules! decrementor {
     };
 }
 
-macro_rules! draw_method {
-    ($value:expr, $page:ident, bool) => {
-        $page.write(if $value { b"      On" } else { b"     Off" })
-    };
-    ($value:expr, $page:ident, u8) => {
-        $page.skip(2).uint($value as u16)
-    };
-    ($value:expr, $page:ident, u16) => {
-        $page.skip(2).uint($value)
-    };
-    ($value:expr, $page:ident, u32) => {
-        $page.skip(2).uint($value as u16)
-    };
-    ($value:expr, $page:ident, i8) => {
-        $page.skip(2).sint($value as i16)
-    };
-    ($value:expr, $page:ident, i16) => {
-        $page.skip(2).sint($value)
-    };
-    ($value:expr, $page:ident, i32) => {
-        $page.skip(2).sint($value as i16)
-    };
-    ($value:expr, $page:ident, f32) => {
-        $page.decimal($value).byte(b'F')
-    };
-    ($value:expr, $page:ident, Month) => {
-        $page.skip(5).write($value.abbrev().as_bytes())
-    };
-    ($value:expr, $page:ident, Date) => {{
-        $page.skip(4).hexit2($value.bcd()).write($value.suffix())
-    }};
-    ($value:expr, $page:ident, Duty) => {
-        $page.skip(2).uint($value.0)
-    };
-}
-
 macro_rules! range_hint {
     (bool) => {
         b"R=[T,F]     S=toggle"
@@ -380,7 +344,7 @@ macro_rules! build_setter {
     ($kind:ident match $buffer:ident {
         $($arm_pat:pat => $arm_block:block),*
      } $self_:ident @ $disp_a:ident, $field_a:ident, Month; $disp_b:ident, $field_b:ident, Date; $($tail:tt)*) => {
-        crate::codegen::build_setter!($kind match $buffer {
+        $crate::codegen::build_setter!($kind match $buffer {
             $($arm_pat => $arm_block,)*
             $kind::$disp_a(x) => {
                 $self_.$field_a = x;
@@ -395,7 +359,7 @@ macro_rules! build_setter {
     ($kind:ident match $buffer:ident {
         $($arm_pat:pat => $arm_block:block),*
      } $self_:ident @ $disp_name:ident, $field_name:ident, $type:ty; $($tail:tt)*) => {
-        crate::codegen::build_setter!($kind match $buffer {
+        $crate::codegen::build_setter!($kind match $buffer {
             $($arm_pat => $arm_block,)*
             $kind::$disp_name(x) => {
                 $self_.$field_name = x;
@@ -433,7 +397,7 @@ macro_rules! interactive {
 
             const FIELD_COUNT: u8 = [$(stringify!($field_name)),*].len() as u8;
 
-            const NAMES: [[u8; 18]; Self::FIELD_COUNT as usize + 1] = [crate::utils::pad_bytes($exit_str), $(crate::utils::pad_bytes(stringify!($disp_name).as_bytes())),*];
+            const NAMES: [[u8; 18]; Self::FIELD_COUNT as usize + 1] = [$crate::utils::pad_bytes($exit_str), $($crate::utils::pad_bytes(stringify!($disp_name).as_bytes())),*];
 
             const fn get_buffer(&self, index: u8) -> Option<$buffer_name> {
                 if index == 0 { return None; }
@@ -446,7 +410,7 @@ macro_rules! interactive {
             }
 
             const fn set_buffer(&mut self, buffer: $buffer_name) {
-                crate::codegen::build_setter!($buffer_name match buffer {} self @ $($disp_name, $field_name, $field_type;)*)
+                $crate::codegen::build_setter!($buffer_name match buffer {} self @ $($disp_name, $field_name, $field_type;)*)
             }
         }
 
@@ -460,54 +424,41 @@ macro_rules! interactive {
                 *self = match click {
                     Click::CW => match *self {
                         $(
-                            Self::$disp_name(x) => Self::$disp_name(crate::codegen::incrementor!(x, $field_type))
+                            Self::$disp_name(x) => Self::$disp_name($crate::codegen::incrementor!(x, $field_type))
                         ),*
                     },
                     Click::CCW => match *self {
                         $(
-                            Self::$disp_name(x) => Self::$disp_name(crate::codegen::decrementor!(x, $field_type))
+                            Self::$disp_name(x) => Self::$disp_name($crate::codegen::decrementor!(x, $field_type))
                         ),*
                     },
                 }
             }
 
-            const fn name(&self) -> &[u8; 18] {
-                match self {
+            const fn generate_edit_page(&self, page: &mut PageData) {
+                let (name, hint) = match self {
                     $(
-                        Self::$disp_name(_) => &$name::NAMES[${index()} + 1]
+                        Self::$disp_name(_) => (
+                            &$name::NAMES[${index()} + 1],
+                            $crate::codegen::range_hint!($field_type)
+                        )
                     ),*
-                }
-            }
+                };
 
-            const fn draw(&self, page: PageBuilder) -> PageBuilder {
-                match self {
-                    $(
-                        Self::$disp_name(x) => crate::codegen::draw_method!(*x, page, $field_type)
-                    ),*
-                }
-            }
-
-            const fn range_hint(&self) -> &[u8; 20] {
-                match self {
-                    $(
-                        Self::$disp_name(_) => crate::codegen::range_hint!($field_type)
-                    ),*
-                }
-            }
-
-            const fn generate_edit_page(&self) -> PageData {
-                let page = PageBuilder::new()
-                    .byte(b'[')
-                    .write(self.name())
-                    .byte(b']')
-                    .end_line()
-                    .skip(2);
-                self
-                    .draw(page)
-                    .end_line()
-                    .write(self.range_hint())
-                    .write($info_str)
-                    .finish()
+                $crate::page!(
+                    rewrite page;
+                    byte b'[';
+                    write 18 name;
+                    byte b']';
+                    end_line;
+                    skip 2;
+                    match FIELD (*self) {
+                        $( Self::$disp_name(x) => { field $field_type x; } )*
+                    }
+                    end_line;
+                    write 20 hint;
+                    write $info_str;
+                )
             }
         }
     };
@@ -526,7 +477,7 @@ macro_rules! portable {
         info = $info_str:literal;
         $buffer_name:ident
     ) => {
-        crate::codegen::interactive!(
+        $crate::codegen::interactive!(
             $(#[$meta])*
             $vis struct $name {
                 $(
@@ -561,7 +512,7 @@ macro_rules! portable {
                 let data_sig = u32::from_le_bytes([data[52], data[53], data[54], data[55]]);
                 if data_sig == Self::SIGNATURE {
                     let mut offset = 0;
-                    Ok(Self{$($field_name: crate::codegen::extract!(data, offset, $field_type)),*})
+                    Ok(Self{$($field_name: $crate::codegen::extract!(data, offset, $field_type)),*})
                 } else {
                     Err(data)
                 }
@@ -573,7 +524,7 @@ macro_rules! portable {
                 let Self {$($field_name),*} = self;
                 let mut data = [0;56];
                 let mut offset = 0;
-                $(crate::codegen::inject!($field_name, data, offset, $field_type);)*
+                $($crate::codegen::inject!($field_name, data, offset, $field_type);)*
                 //build_injector!({} 0, data @ $($field_name, $field_type;)*);
                 [data[52], data[53], data[54], data[55]] = Self::SIGNATURE.to_le_bytes();
                 data
@@ -614,7 +565,7 @@ macro_rules! build_revolver {
     ($type:ident match $value:ident {
         $($in_names:pat => $out_names:expr),*
      } @forward $name_a:ident $name_b:ident $($tail:tt)*) => {
-        crate::codegen::build_revolver!($type match $value {
+        $crate::codegen::build_revolver!($type match $value {
             $($in_names => $out_names,)*
             $type::$name_a => $type::$name_b
         } @forward $name_b $($tail)*)
@@ -622,7 +573,7 @@ macro_rules! build_revolver {
     ($type:ident match $value:ident {
         $($in_names:pat => $out_names:expr),*
      } @reverse $name_a:ident $name_b:ident $($tail:tt)*) => {
-        crate::codegen::build_revolver!($type match $value {
+        $crate::codegen::build_revolver!($type match $value {
             $($in_names => $out_names,)*
             $type::$name_b => $type::$name_a
         } @reverse $name_b $($tail)*)
@@ -630,7 +581,7 @@ macro_rules! build_revolver {
     ($type:ident match $value:ident {
         $($in_names:pat => $out_names:expr),*
      } @forward @ $name_a:ident $name_b:ident $($tail:tt)*) => {
-        crate::codegen::build_revolver!($type match $value {
+        $crate::codegen::build_revolver!($type match $value {
             $($in_names => $out_names,)*
             $type::$name_a => $type::$name_b
         } @forward $name_b $($tail)* @ $name_a)
@@ -638,7 +589,7 @@ macro_rules! build_revolver {
     ($type:ident match $value:ident {
         $($in_names:pat => $out_names:expr),*
      } @reverse @ $name_a:ident $name_b:ident $($tail:tt)*) => {
-        crate::codegen::build_revolver!($type match $value {
+        $crate::codegen::build_revolver!($type match $value {
             $($in_names => $out_names,)*
             $type::$name_b => $type::$name_a
         } @reverse $name_b $($tail)* @ $name_a)
@@ -659,17 +610,17 @@ macro_rules! revolving_enum {
 
         impl $name {
             const fn next(self) -> Self {
-                crate::codegen::build_revolver!($name match self {} @forward @ $($var_name)*)
+                $crate::codegen::build_revolver!($name match self {} @forward @ $($var_name)*)
             }
 
             const fn prev(self) -> Self {
-                crate::codegen::build_revolver!($name match self {} @reverse @ $($var_name)*)
+                $crate::codegen::build_revolver!($name match self {} @reverse @ $($var_name)*)
             }
         }
     };
 }
 
 pub(crate) use {
-    build_revolver, build_setter, decrementor, draw_method, extract, incrementor, inject,
-    interactive, portable, range_hint, revolving_enum,
+    build_revolver, build_setter, decrementor, extract, incrementor, inject, interactive, portable,
+    range_hint, revolving_enum,
 };
